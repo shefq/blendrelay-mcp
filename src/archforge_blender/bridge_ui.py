@@ -10,9 +10,9 @@ import threading
 import time
 import uuid
 import bpy
-from bpy.props import BoolProperty, StringProperty, EnumProperty
+from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, FloatProperty
 from .client import Connection,default_root
-from . import general, sketch
+from . import general, sketch, viewport_hud
 
 STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
            codex_process=None,codex_output=None,codex_log=None,codex_started=0,
@@ -511,6 +511,7 @@ def received(response):
 
 def timer():
     check_codex()
+    viewport_hud.ensure_hud_modal()
     c=STATE['connection']
     if c:
         try:
@@ -689,68 +690,270 @@ class AF_OT_RestoreVersion(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class AF_OT_AppendPromptTag(bpy.types.Operator):
+    bl_idname = 'archforge.append_prompt_tag'
+    bl_label = 'Append tag to prompt'
+    tag: StringProperty(name='Tag', default='')
+
+    def execute(self, context):
+        current = context.scene.archforge_codex_prompt.strip()
+        if not current:
+            context.scene.archforge_codex_prompt = self.tag
+        elif self.tag.lower() not in current.lower():
+            context.scene.archforge_codex_prompt = f"{current}, {self.tag}"
+        return {'FINISHED'}
+
+
+class AF_OT_ClearPrompt(bpy.types.Operator):
+    bl_idname = 'archforge.clear_prompt'
+    bl_label = 'Clear prompt'
+
+    def execute(self, context):
+        context.scene.archforge_codex_prompt = ''
+        return {'FINISHED'}
+
+
+class AF_OT_ToggleViewportHUD(bpy.types.Operator):
+    bl_idname = 'archforge.toggle_viewport_hud'
+    bl_label = 'Toggle Viewport HUD'
+    bl_description = 'Show or hide the floating AI Viewport HUD bar'
+
+    def execute(self, context):
+        context.scene.archforge_show_viewport_hud = not context.scene.archforge_show_viewport_hud
+        if context.scene.archforge_show_viewport_hud:
+            viewport_hud.ensure_hud_modal()
+        else:
+            viewport_hud.HUD_STATE['modal_active'] = False
+            viewport_hud.HUD_STATE['typing'] = False
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        return {'FINISHED'}
+
+
+class AF_OT_ResetHUDTransform(bpy.types.Operator):
+    bl_idname = 'archforge.reset_hud_transform'
+    bl_label = 'Reset HUD Layout'
+    bl_description = 'Reset floating HUD to default position, width, and scale'
+
+    def execute(self, context):
+        context.scene.archforge_hud_width = 780
+        context.scene.archforge_hud_scale = 1.0
+        context.scene.archforge_hud_x_offset = 0.0
+        context.scene.archforge_hud_y_offset = 0.0
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        return {'FINISHED'}
+
+
 class AF_PT_Main(bpy.types.Panel):
-    bl_label='ArchForge MCP';bl_idname='AF_PT_Main';bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='ArchForge'
-    def draw(self,context):
-        layout=self.layout
-        layout.label(text='ArchForge MCP · 0.2.3')
-        for i in range(0,min(160,len(STATE['status'])),40):layout.label(text=STATE['status'][i:i+40])
-        layout.prop(context.scene,'archforge_runtime_dir')
-        row=layout.row();row.operator('archforge.refresh',icon='FILE_REFRESH')
-        if STATE['connection']:row.operator('archforge.disconnect',text='',icon='X')
-        sketch_box=layout.box();data=sketch.payload(context.scene)
-        sketch_box.label(text='1. Sketch the target area',icon='BRUSH_DATA')
-        sketch_box.label(text=str(data['stroke_count'])+' strokes · '+str(len(data['hit_objects']))+' scene objects identified')
-        row=sketch_box.row();row.operator('archforge.new_viewport_sketch',icon='FILE_NEW');row.operator('archforge.draw_viewport_sketch',text='Add stroke',icon='BRUSH_DATA')
-        sketch_box.operator('archforge.clear_viewport_sketch',icon='TRASH')
-        if STATE.get('sketch_viewport'):sketch_box.label(text='Viewport image: '+Path(STATE['sketch_viewport']).name,icon='IMAGE_DATA')
+    bl_label = 'ArchForge AI'
+    bl_idname = 'AF_PT_Main'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'ArchForge'
 
-        agent = getattr(context.scene, 'archforge_agent_backend', 'ANTIGRAVITY')
-        agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
-        box = layout.box()
-        box.label(text=f'2. Describe the change for {agent_name}', icon='CONSOLE')
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
 
-        row = box.row(align=True)
-        row.prop(context.scene, 'archforge_agent_backend', expand=True)
+        # ── 1. Top Header Banner & Connection Status ────────────────────────
+        header_box = layout.box()
+        header_row = header_box.row(align=True)
+        header_row.label(text='ArchForge Studio', icon='AUTO')
+        header_row.operator(
+            'archforge.toggle_viewport_hud',
+            text='HUD',
+            icon='WINDOW',
+            depress=getattr(scene, 'archforge_show_viewport_hud', False),
+        )
+        header_row.label(text='v0.2.3')
 
-        box.prop(context.scene, 'archforge_codex_prompt', text='')
-        row_sel = box.row(align=True)
-        row_sel.prop(context.scene, 'archforge_include_selection')
-        row_sel.prop(context.scene, 'archforge_only_selected')
-        if getattr(context.scene, 'archforge_only_selected', False):
-            box.label(text='🎯 Only selected objects will be fed to the model', icon='RESTRICT_SELECT_OFF')
+        conn_row = header_box.row(align=True)
+        conn = STATE.get('connection')
+        if conn:
+            conn_row.label(text='● Connected', icon='CHECKMARK')
+            conn_row.operator('archforge.refresh', text='', icon='FILE_REFRESH')
+            conn_row.operator('archforge.disconnect', text='', icon='X')
         else:
-            box.label(text=f'{agent_name} receives marked viewport, sketch targets, and selection')
+            conn_row.alert = True
+            conn_row.label(text='● Disconnected', icon='ERROR')
+            conn_row.operator('archforge.refresh', text='Connect', icon='PLAY')
 
-        if agent == 'ANTIGRAVITY':
-            box.prop(context.scene, 'archforge_antigravity_model', text='Model')
-            if getattr(context.scene, 'archforge_antigravity_model', '') == 'custom':
-                box.prop(context.scene, 'archforge_antigravity_model_custom', text='Custom')
-            box.prop(context.scene, 'archforge_antigravity_path')
-        else:
-            box.prop(context.scene, 'archforge_codex_model', text='Model')
-            if getattr(context.scene, 'archforge_codex_model', '') == 'custom':
-                box.prop(context.scene, 'archforge_codex_model_custom', text='Custom')
-            box.prop(context.scene, 'archforge_codex_path')
+        # ── 2. Segmented Pill Navigation Bar ────────────────────────────────
+        nav_row = layout.row(align=True)
+        nav_row.scale_y = 1.25
+        nav_row.prop(scene, 'archforge_ui_tab', expand=True)
 
-        row = box.row()
-        row.operator('archforge.send_to_agent', text=f'Send to {agent_name}', icon='PLAY')
-        if hasattr(bpy.ops.wm, 'console_toggle'):
-            row.operator('wm.console_toggle', text='Toggle Console', icon='CONSOLE')
+        layout.separator(factor=0.4)
 
-        active_proc = STATE.get('agent_process') or STATE.get('codex_process')
-        if active_proc:
-            row_run = box.row()
-            row_run.label(text=f'{agent_name} task running…', icon='TIME')
-            row_run.operator('archforge.cancel_agent', text='Cancel Task', icon='CANCEL')
-        elif STATE.get('agent_log'):
-            box.label(text='Last log: ' + Path(STATE['agent_log']).name)
-        elif STATE.get('codex_log'):
-            box.label(text='Last log: ' + Path(STATE['codex_log']).name)
+        tab = getattr(scene, 'archforge_ui_tab', 'GENERATE')
 
-        box=layout.box();box.label(text='Scene versions',icon='RECOVER_LAST');box.operator('archforge.checkpoint',icon='ADD')
-        for entry in reversed(STATE['versions']):
-            op=box.operator('archforge.restore_version',text=entry['label'][:40]);op.version_id=entry['version_id']
+        # ── TAB: GENERATE ───────────────────────────────────────────────────
+        if tab == 'GENERATE':
+            agent = getattr(scene, 'archforge_agent_backend', 'ANTIGRAVITY')
+            agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
+            model = scene.archforge_antigravity_model if agent == 'ANTIGRAVITY' else scene.archforge_codex_model
+            if model == 'custom':
+                model = getattr(scene, 'archforge_antigravity_model_custom' if agent == 'ANTIGRAVITY' else 'archforge_codex_model_custom', 'custom')
+
+            # Active Task Running Banner
+            active_proc = STATE.get('agent_process') or STATE.get('codex_process')
+            if active_proc:
+                task_box = layout.box()
+                task_row = task_box.row(align=True)
+                task_row.scale_y = 1.3
+                task_row.alert = True
+                task_row.label(text=f'⚡ {agent_name} is generating…', icon='TIME')
+                task_row.operator('archforge.cancel_agent', text='Cancel', icon='CANCEL')
+            elif STATE.get('status') and STATE['status'] != 'Disconnected':
+                status_box = layout.box()
+                s_row = status_box.row(align=True)
+                s_row.label(text=f'Engine: {agent_name}', icon='CONSOLE')
+                s_row.label(text=f'{model[:22]}', icon='RADIOBUT_ON')
+
+            # Prompt Card
+            prompt_card = layout.box()
+            p_header = prompt_card.row(align=True)
+            p_header.label(text='Prompt Instruction', icon='TEXT')
+            if scene.archforge_codex_prompt:
+                p_header.operator('archforge.clear_prompt', text='', icon='X', emboss=False)
+
+            prompt_card.prop(scene, 'archforge_codex_prompt', text='')
+
+            # Quick Tag Chips
+            tags_row = prompt_card.row(align=True)
+            tags_row.scale_y = 0.85
+            tags = [
+                ('+ Realistic Mats', 'with realistic materials and smooth shading'),
+                ('+ Low Poly', 'stylized low poly aesthetic'),
+                ('+ Bevel', 'with bevel modifiers on sharp edges'),
+            ]
+            for label, val in tags:
+                op = tags_row.operator('archforge.append_prompt_tag', text=label)
+                op.tag = val
+
+            layout.separator(factor=0.3)
+
+            # Target Scope Card
+            scope_card = layout.box()
+            sc_header = scope_card.row(align=True)
+            sc_header.label(text='Target Scope', icon='OBJECT_DATAMODE')
+            num_sel = len(context.selected_objects)
+            sc_header.label(text=f'({num_sel} selected)')
+
+            sc_row = scope_card.row(align=True)
+            sc_row.prop(scene, 'archforge_include_selection', toggle=True)
+            sc_row.prop(scene, 'archforge_only_selected', toggle=True)
+
+            if getattr(scene, 'archforge_only_selected', False):
+                scope_card.label(text='🎯 Restricted: ONLY selected objects fed to model', icon='RESTRICT_SELECT_OFF')
+
+            layout.separator(factor=0.4)
+
+            # Primary Call-To-Action Button
+            cta_row = layout.row()
+            cta_row.scale_y = 1.55
+            cta_row.operator('archforge.send_to_agent', text=f'✨ Generate with {agent_name}', icon='PLAY')
+
+            sub_row = layout.row(align=True)
+            if hasattr(bpy.ops.wm, 'console_toggle'):
+                sub_row.operator('wm.console_toggle', text='Toggle Console', icon='CONSOLE')
+            last_log = STATE.get('agent_log') or STATE.get('codex_log')
+            if last_log and Path(last_log).exists():
+                sub_row.label(text=f'Log: {Path(last_log).name[:20]}', icon='FILE_TEXT')
+
+        # ── TAB: SKETCH ─────────────────────────────────────────────────────
+        elif tab == 'SKETCH':
+            sketch_box = layout.box()
+            sketch_data = sketch.payload(context.scene)
+            s_header = sketch_box.row(align=True)
+            s_header.label(text='Viewport Sketching', icon='BRUSH_DATA')
+            s_header.label(text=f'{sketch_data["stroke_count"]} strokes')
+
+            if sketch_data['hit_objects']:
+                hits_str = ', '.join(sketch_data['hit_objects'][:4])
+                sketch_box.label(text=f'Targeting: {hits_str}', icon='RESTRICT_SELECT_OFF')
+
+            btn_row = sketch_box.row(align=True)
+            btn_row.scale_y = 1.3
+            btn_row.operator('archforge.draw_viewport_sketch', text='Draw Stroke', icon='BRUSH_DATA')
+            btn_row.operator('archforge.new_viewport_sketch', text='New', icon='FILE_NEW')
+            btn_row.operator('archforge.clear_viewport_sketch', text='Clear', icon='TRASH')
+
+            if STATE.get('sketch_viewport'):
+                vp_box = sketch_box.box()
+                vp_box.label(text='Snapshot: ' + Path(STATE['sketch_viewport']).name, icon='IMAGE_DATA')
+
+        # ── TAB: HISTORY (Checkpoints) ──────────────────────────────────────
+        elif tab == 'HISTORY':
+            hist_box = layout.box()
+            h_row = hist_box.row(align=True)
+            h_row.label(text='Scene Versions', icon='RECOVER_LAST')
+            h_row.label(text=f'{len(STATE["versions"])} saved')
+
+            create_row = layout.row()
+            create_row.scale_y = 1.2
+            create_row.operator('archforge.checkpoint', text='💾 Save Checkpoint', icon='ADD')
+
+            if not STATE['versions']:
+                empty_card = layout.box()
+                empty_card.label(text='No checkpoints saved yet.', icon='INFO')
+                empty_card.label(text='Checkpoints are saved automatically after AI tasks.')
+            else:
+                list_box = layout.box()
+                for entry in reversed(STATE['versions'][:15]):
+                    row_v = list_box.row(align=True)
+                    op = row_v.operator('archforge.restore_version', text=entry['label'][:38], icon='LOOP_BACK')
+                    op.version_id = entry['version_id']
+
+        # ── TAB: SETTINGS ───────────────────────────────────────────────────
+        elif tab == 'SETTINGS':
+            settings_box = layout.box()
+            settings_box.label(text='Agent Backend & Models', icon='PREFERENCES')
+
+            b_row = settings_box.row(align=True)
+            b_row.scale_y = 1.15
+            b_row.prop(scene, 'archforge_agent_backend', expand=True)
+
+            agent = getattr(scene, 'archforge_agent_backend', 'ANTIGRAVITY')
+
+            col = settings_box.column()
+            col.use_property_split = True
+            col.use_property_decorate = False
+
+            if agent == 'ANTIGRAVITY':
+                col.prop(scene, 'archforge_antigravity_model', text='Model')
+                if getattr(scene, 'archforge_antigravity_model', '') == 'custom':
+                    col.prop(scene, 'archforge_antigravity_model_custom', text='Custom Model')
+                col.prop(scene, 'archforge_antigravity_path', text='CLI Path')
+            else:
+                col.prop(scene, 'archforge_codex_model', text='Model')
+                if getattr(scene, 'archforge_codex_model', '') == 'custom':
+                    col.prop(scene, 'archforge_codex_model_custom', text='Custom Model')
+                col.prop(scene, 'archforge_codex_path', text='CLI Path')
+
+            layout.separator(factor=0.5)
+
+            hud_box = layout.box()
+            hud_box.label(text='Floating Viewport HUD', icon='WINDOW')
+            col_hud = hud_box.column()
+            col_hud.use_property_split = True
+            col_hud.use_property_decorate = False
+            col_hud.prop(scene, 'archforge_show_viewport_hud', text='Show HUD')
+            col_hud.prop(scene, 'archforge_hud_width', text='Width (px)', slider=True)
+            col_hud.prop(scene, 'archforge_hud_scale', text='Scale', slider=True)
+            hud_box.operator('archforge.reset_hud_transform', text='Reset HUD Layout', icon='LOOP_BACK')
+
+            layout.separator(factor=0.5)
+
+            runtime_box = layout.box()
+            runtime_box.label(text='Runtime Bridge', icon='NETWORK_DRIVE')
+            col_rt = runtime_box.column()
+            col_rt.use_property_split = True
+            col_rt.use_property_decorate = False
+            col_rt.prop(scene, 'archforge_runtime_dir', text='Data Directory')
 
 
 CLASSES = (
@@ -764,6 +967,11 @@ CLASSES = (
     AF_OT_ClearSketch,
     AF_OT_NewSketch,
     AF_OT_RestoreVersion,
+    AF_OT_AppendPromptTag,
+    AF_OT_ClearPrompt,
+    AF_OT_ToggleViewportHUD,
+    AF_OT_ResetHUDTransform,
+    viewport_hud.AF_OT_ViewportHUDModal,
     AF_PT_Main,
 )
 
@@ -778,6 +986,17 @@ def register():
         name='Only selected objects',
         description='Feed ONLY selected objects to the model and restrict its operations to them',
         default=False,
+    )
+    bpy.types.Scene.archforge_ui_tab = EnumProperty(
+        name='Panel Tab',
+        description='Switch between ArchForge interface views',
+        items=[
+            ('GENERATE', 'Generate', 'AI prompt, target scope, and generation', 'AUTO', 0),
+            ('SKETCH', 'Sketch', '2D viewport target sketch', 'BRUSH_DATA', 1),
+            ('HISTORY', 'Versions', 'Scene checkpoints & history', 'RECOVER_LAST', 2),
+            ('SETTINGS', 'Settings', 'Backend, model, and engine settings', 'PREFERENCES', 3),
+        ],
+        default='GENERATE',
     )
 
     bpy.types.Scene.archforge_agent_backend = EnumProperty(
@@ -838,7 +1057,40 @@ def register():
         default=default_codex_path(),
     )
 
+    bpy.types.Scene.archforge_show_viewport_hud = BoolProperty(
+        name='Floating Viewport HUD',
+        description='Display modern floating AI command bar directly in the 3D Viewport',
+        default=True,
+    )
+    bpy.types.Scene.archforge_hud_width = IntProperty(
+        name='HUD Width',
+        description='Width of the floating AI command bar in pixels',
+        default=780,
+        min=500,
+        max=1500,
+    )
+    bpy.types.Scene.archforge_hud_scale = FloatProperty(
+        name='HUD Scale',
+        description='Overall size multiplier for the floating AI command bar',
+        default=1.0,
+        min=0.6,
+        max=1.6,
+        step=5,
+        precision=2,
+    )
+    bpy.types.Scene.archforge_hud_x_offset = FloatProperty(
+        name='HUD X Offset',
+        description='Horizontal position offset in the viewport',
+        default=0.0,
+    )
+    bpy.types.Scene.archforge_hud_y_offset = FloatProperty(
+        name='HUD Y Offset',
+        description='Vertical position offset in the viewport',
+        default=0.0,
+    )
+
     sketch.register_overlay()
+    viewport_hud.register_hud()
     bpy.app.timers.register(timer, first_interval=.1, persistent=True)
 
 
@@ -849,16 +1101,31 @@ def unregister():
         STATE['connection'].close()
     STATE['connection'] = None
     sketch.unregister_overlay()
-    del bpy.types.Scene.archforge_runtime_dir
-    del bpy.types.Scene.archforge_codex_prompt
-    del bpy.types.Scene.archforge_include_selection
-    del bpy.types.Scene.archforge_only_selected
-    del bpy.types.Scene.archforge_agent_backend
-    del bpy.types.Scene.archforge_antigravity_model
-    del bpy.types.Scene.archforge_antigravity_model_custom
-    del bpy.types.Scene.archforge_antigravity_path
-    del bpy.types.Scene.archforge_codex_model
-    del bpy.types.Scene.archforge_codex_model_custom
-    del bpy.types.Scene.archforge_codex_path
+    viewport_hud.unregister_hud()
+    props_to_del = [
+        'archforge_runtime_dir',
+        'archforge_codex_prompt',
+        'archforge_include_selection',
+        'archforge_only_selected',
+        'archforge_show_viewport_hud',
+        'archforge_hud_width',
+        'archforge_hud_scale',
+        'archforge_hud_x_offset',
+        'archforge_hud_y_offset',
+        'archforge_ui_tab',
+        'archforge_agent_backend',
+        'archforge_antigravity_model',
+        'archforge_antigravity_model_custom',
+        'archforge_antigravity_path',
+        'archforge_codex_model',
+        'archforge_codex_model_custom',
+        'archforge_codex_path',
+    ]
+    for prop in props_to_del:
+        if hasattr(bpy.types.Scene, prop):
+            delattr(bpy.types.Scene, prop)
     for cls in reversed(CLASSES):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass

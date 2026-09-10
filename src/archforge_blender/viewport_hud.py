@@ -1,0 +1,978 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Modern Viewport Floating AI Command HUD for ArchForge.
+
+Rendered at 60 FPS in 3D Viewport 2D screen space via Blender's GPU & BLF modules.
+Designed with a unique Cyber-Architectural dark obsidian chassis and electric cyan accents.
+Features full interactive drag-to-resize (left/right edges & corner grip), titlebar drag-to-move,
+scale zoom buttons (+/-), Ctrl+Wheel zoom, and rock-solid click hit-testing.
+"""
+import math
+import time
+from pathlib import Path
+import bpy
+import blf
+import gpu
+from gpu_extras.batch import batch_for_shader
+
+# ── Preset Prompt Suggestions ───────────────────────────────────────────────
+
+PRESETS = [
+    'with realistic PBR materials and cinematic lighting',
+    'modern architectural glass pavilion aesthetic',
+    'cyberpunk neon detailing with metallic shaders',
+    'clean minimalist low-poly geometric style',
+    'add bevel modifiers on sharp mesh edges',
+    'centered at origin with clean subdivision topology',
+]
+
+MODELS_ANTIGRAVITY = [
+    ('gemini-3.8-flash-high', 'Flash 3.8 High'),
+    ('gemini-3.8-flash-medium', 'Flash 3.8 Med'),
+    ('gemini-3.1-pro-high', 'Gemini 3.1 Pro'),
+    ('claude-sonnet-4-6', 'Claude Sonnet'),
+    ('claude-opus-4-6-thinking', 'Claude Opus'),
+]
+
+MODELS_CODEX = [
+    ('gpt-5.5', 'GPT-5.5'),
+    ('gpt-5', 'GPT-5'),
+    ('gpt-4o', 'GPT-4o'),
+    ('o3-mini', 'o3-mini'),
+]
+
+# ── Global HUD State ─────────────────────────────────────────────────────────
+
+HUD_STATE = {
+    'handler': None,
+    'modal_active': False,
+    'hover': None,
+    'typing': False,
+    'dragging': None,
+    'drag_start_mouse': (0, 0),
+    'drag_start_width': 780.0,
+    'drag_start_scale': 1.0,
+    'drag_start_offset': (0.0, 0.0),
+    'cursor_time': 0.0,
+    'preset_idx': 0,
+    'bounds': {},
+    'last_mouse': (0, 0),
+    'flash_msg': '',
+    'flash_time': 0.0,
+}
+
+
+# ── Geometry & Shader Utilities ──────────────────────────────────────────────
+
+def _make_rounded_fan(x, y, w, h, r, segs=6):
+    """Generate CCW vertices for a convex triangle fan representing a rounded rect."""
+    r = max(0.0, min(r, min(w, h) / 2.0))
+    cx, cy = x + w / 2.0, y + h / 2.0
+    verts = [(cx, cy)]
+    corners = [
+        (x + w - r, y + h - r, 0.0, math.pi / 2.0),
+        (x + r, y + h - r, math.pi / 2.0, math.pi),
+        (x + r, y + r, math.pi, 3.0 * math.pi / 2.0),
+        (x + w - r, y + r, 3.0 * math.pi / 2.0, 2.0 * math.pi),
+    ]
+    for ccx, ccy, a0, a1 in corners:
+        for i in range(segs + 1):
+            theta = a0 + (a1 - a0) * (i / segs)
+            verts.append((ccx + r * math.cos(theta), ccy + r * math.sin(theta)))
+    verts.append(verts[1])
+    return verts
+
+
+def _draw_rounded_box(x, y, w, h, r, fill_color, border_color=None, border_width=1.0, segs=6):
+    """Draw a smooth rounded rectangle with optional border."""
+    verts = _make_rounded_fan(x, y, w, h, r, segs)
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+
+    # Fill
+    shader.bind()
+    shader.uniform_float('color', fill_color)
+    batch_for_shader(shader, 'TRI_FAN', {'pos': verts}).draw(shader)
+
+    # Border
+    if border_color and border_width > 0:
+        gpu.state.line_width_set(border_width)
+        shader.bind()
+        shader.uniform_float('color', border_color)
+        batch_for_shader(shader, 'LINE_STRIP', {'pos': verts[1:]}).draw(shader)
+        gpu.state.line_width_set(1.0)
+
+    gpu.state.blend_set('NONE')
+
+
+def _draw_top_accent_line(x, y, w, h, r, color=(0.0, 0.85, 1.0, 0.9), width=2.0):
+    """Draw a glowing cyan accent line along the top edge of the chassis."""
+    r = max(0.0, min(r, min(w, h) / 2.0))
+    pts = [
+        (x + r + 4.0, y + h),
+        (x + w - r - 4.0, y + h),
+    ]
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(width)
+    shader.bind()
+    shader.uniform_float('color', color)
+    batch_for_shader(shader, 'LINE_STRIP', {'pos': pts}).draw(shader)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
+def _draw_edge_highlight(x, y, h, scale, color=(0.0, 0.85, 1.0, 0.9)):
+    """Draw glowing vertical bar when hovering left/right resize borders."""
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(max(1.5, 3.0 * scale))
+    shader.bind()
+    shader.uniform_float('color', color)
+    pts = [(x, y + 10.0 * scale), (x, y + h - 10.0 * scale)]
+    batch_for_shader(shader, 'LINE_STRIP', {'pos': pts}).draw(shader)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
+def _draw_grip_lines(x, y, scale, color=(0.0, 0.85, 1.0, 0.9)):
+    """Draw 3 sleek diagonal resize grip lines in the bottom right corner."""
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(max(1.0, 1.5 * scale))
+    shader.bind()
+    shader.uniform_float('color', color)
+    lines = [
+        (x + 14.0 * scale, y + 3.0 * scale),
+        (x + 3.0 * scale, y + 14.0 * scale),
+        (x + 14.0 * scale, y + 7.0 * scale),
+        (x + 7.0 * scale, y + 14.0 * scale),
+        (x + 14.0 * scale, y + 11.0 * scale),
+        (x + 11.0 * scale, y + 14.0 * scale),
+    ]
+    batch_for_shader(shader, 'LINES', {'pos': lines}).draw(shader)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
+def _draw_circle(cx, cy, r, color, segs=16):
+    """Draw a smooth filled circle."""
+    verts = [(cx, cy)]
+    for i in range(segs + 1):
+        theta = 2.0 * math.pi * (i / segs)
+        verts.append((cx + r * math.cos(theta), cy + r * math.sin(theta)))
+    shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    shader.bind()
+    shader.uniform_float('color', color)
+    batch_for_shader(shader, 'TRI_FAN', {'pos': verts}).draw(shader)
+    gpu.state.blend_set('NONE')
+
+
+def _draw_text(text, x, y, size=13, color=(0.95, 0.95, 0.95, 1.0)):
+    """Draw text at absolute 2D pixel coordinates."""
+    font_id = 0
+    blf.size(font_id, max(9, int(size)))
+    blf.color(font_id, *color)
+    blf.position(font_id, x, y, 0)
+    blf.draw(font_id, text)
+
+
+def _draw_text_centered(text, bx, by, bw, bh, size=12, color=(0.95, 0.95, 0.95, 1.0)):
+    """Draw text perfectly centered inside a bounding box."""
+    font_id = 0
+    blf.size(font_id, max(9, int(size)))
+    tw, th = blf.dimensions(font_id, text)
+    tx = bx + (bw - tw) / 2.0
+    ty = by + (bh - th) / 2.0 + 1.0
+    blf.color(font_id, *color)
+    blf.position(font_id, tx, ty, 0)
+    blf.draw(font_id, text)
+
+
+def _truncate_left(text, max_w, size=13):
+    """Truncate text keeping the end visible while typing."""
+    font_id = 0
+    blf.size(font_id, max(9, int(size)))
+    if blf.dimensions(font_id, text)[0] <= max_w:
+        return text
+    ellipsis = '...'
+    ew = blf.dimensions(font_id, ellipsis)[0]
+    while text and blf.dimensions(font_id, text)[0] + ew > max_w:
+        text = text[1:]
+    return ellipsis + text
+
+
+# ── Main 2D Drawing Callback ────────────────────────────────────────────────
+
+def draw_viewport_hud():
+    """Render the unique ArchForge floating AI command bar over the 3D Viewport."""
+    context = bpy.context
+    scene = getattr(context, 'scene', None)
+    if not scene or not getattr(scene, 'archforge_show_viewport_hud', False):
+        return
+
+    region = context.region
+    if region is None or region.type != 'WINDOW':
+        return
+
+    from . import bridge_ui
+    agent = getattr(scene, 'archforge_agent_backend', 'ANTIGRAVITY')
+    agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
+    is_running = bool(bridge_ui.STATE.get('agent_process') or bridge_ui.STATE.get('codex_process'))
+    only_selected = getattr(scene, 'archforge_only_selected', False)
+    active_tab = getattr(scene, 'archforge_ui_tab', 'GENERATE')
+
+    # Model friendly name
+    if agent == 'ANTIGRAVITY':
+        cur_model = getattr(scene, 'archforge_antigravity_model', 'gemini-3.8-flash-high')
+        model_map = dict(MODELS_ANTIGRAVITY)
+        model_label = model_map.get(cur_model, cur_model[:12])
+    else:
+        cur_model = getattr(scene, 'archforge_codex_model', 'gpt-5.5')
+        model_map = dict(MODELS_CODEX)
+        model_label = model_map.get(cur_model, cur_model[:12])
+
+    rw = region.width
+    rh = region.height
+
+    # ── Scale & Sizing Transform ─────────────────────────────────────────────
+    scale = getattr(scene, 'archforge_hud_scale', 1.0)
+    scale = max(0.65, min(1.6, float(scale)))
+
+    base_w = getattr(scene, 'archforge_hud_width', 780)
+    base_w = max(500.0, min(1500.0, float(base_w)))
+
+    hud_w = min(base_w * scale, rw - 24.0)
+    hud_h = 126.0 * scale
+
+    x_off = getattr(scene, 'archforge_hud_x_offset', 0.0)
+    y_off = getattr(scene, 'archforge_hud_y_offset', 0.0)
+
+    base_x = (rw - hud_w) / 2.0 + x_off
+    base_y = max(24.0, rh * 0.05) + y_off
+
+    # Clamp to stay visible within the viewport
+    hud_x = max(8.0, min(rw - hud_w - 8.0, base_x))
+    hud_y = max(8.0, min(rh - hud_h - 8.0, base_y))
+
+    bounds = {}
+    hover = HUD_STATE.get('hover')
+
+    # Total bounding box for fast pass-through check (expanded slightly for edge handles)
+    bounds['total'] = (hud_x - 8.0, hud_y - 4.0, hud_w + 16.0, hud_h + 8.0)
+
+    # Resize hit zones
+    bounds['resize_left'] = (hud_x - 7.0, hud_y, 14.0, hud_h)
+    bounds['resize_right'] = (hud_x + hud_w - 7.0, hud_y, 14.0, hud_h)
+    bounds['resize_corner'] = (hud_x + hud_w - 24.0 * scale, hud_y, 24.0 * scale, 24.0 * scale)
+
+    # ── 1. Main Obsidian Glass Chassis ──────────────────────────────────────
+    _draw_rounded_box(
+        hud_x, hud_y, hud_w, hud_h, 15.0 * scale,
+        fill_color=(0.06, 0.08, 0.12, 0.95),
+        border_color=(0.18, 0.24, 0.36, 0.85),
+        border_width=max(1.0, 1.5 * scale),
+    )
+    # Electric Cyan top hairline rim
+    _draw_top_accent_line(hud_x, hud_y, hud_w, hud_h, 15.0 * scale, color=(0.0, 0.82, 1.0, 0.85), width=max(1.5, 2.0 * scale))
+
+    # Draw edge resize indicators on hover
+    if hover in ('resize_left', 'resize_right', 'resize_corner') or HUD_STATE.get('dragging') in ('resize_left', 'resize_right', 'resize_corner'):
+        if hover == 'resize_left' or HUD_STATE.get('dragging') == 'resize_left':
+            _draw_edge_highlight(hud_x, hud_y, hud_h, scale, (0.0, 0.85, 1.0, 0.95))
+        if hover in ('resize_right', 'resize_corner') or HUD_STATE.get('dragging') in ('resize_right', 'resize_corner'):
+            _draw_edge_highlight(hud_x + hud_w, hud_y, hud_h, scale, (0.0, 0.85, 1.0, 0.95))
+
+    # Corner grip slashes
+    grip_x = hud_x + hud_w - 18.0 * scale
+    grip_y = hud_y + 4.0 * scale
+    grip_color = (0.0, 0.85, 1.0, 0.95) if (hover == 'resize_corner' or HUD_STATE.get('dragging') == 'resize_corner') else (0.28, 0.38, 0.55, 0.6)
+    _draw_grip_lines(grip_x, grip_y, scale, grip_color)
+
+    # ── 2. Top Bar: Branding, Live Status, Tabs, Zoom, and Close ─────────────
+    top_y = hud_y + hud_h - 30.0 * scale
+    top_h = 24.0 * scale
+
+    # Titlebar drag region (allows moving HUD freely)
+    bounds['header_drag'] = (hud_x, top_y, hud_w, top_h)
+
+    # Brand badge
+    brand_w = 106.0 * scale
+    brand_x = hud_x + 14.0 * scale
+    _draw_rounded_box(
+        brand_x, top_y, brand_w, top_h, 12.0 * scale,
+        fill_color=(0.08, 0.14, 0.24, 0.85),
+        border_color=(0.0, 0.70, 0.95, 0.5),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered("✦ ARCHFORGE", brand_x, top_y, brand_w, top_h, size=11 * scale, color=(0.15, 0.88, 1.0, 1.0))
+
+    # Live Status Dot & Label
+    status_x = brand_x + brand_w + 10.0 * scale
+    status_y = top_y + 12.0 * scale
+    if is_running:
+        pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 5.0)
+        _draw_circle(status_x, status_y, 4.5 * scale, (0.85 + 0.15 * pulse, 0.25, 0.35, 1.0))
+        _draw_text("RUNNING TASK...", status_x + 8.0 * scale, top_y + 6.0 * scale, size=11 * scale, color=(0.95, 0.45, 0.45, 1.0))
+    elif bridge_ui.STATE.get('connection'):
+        _draw_circle(status_x, status_y, 4.0 * scale, (0.1, 0.9, 0.45, 1.0))
+        _draw_text("READY", status_x + 8.0 * scale, top_y + 6.0 * scale, size=11 * scale, color=(0.4, 0.9, 0.6, 1.0))
+    else:
+        _draw_circle(status_x, status_y, 4.0 * scale, (0.5, 0.55, 0.65, 0.8))
+        _draw_text("STANDBY", status_x + 8.0 * scale, top_y + 6.0 * scale, size=11 * scale, color=(0.55, 0.62, 0.72, 1.0))
+
+    # Right side controls: Close, Console, Zoom (+/-)
+    close_w = 24.0 * scale
+    close_x = hud_x + hud_w - close_w - 14.0 * scale
+    bounds['btn_close'] = (close_x, top_y, close_w, top_h)
+    c_hover = (hover == 'btn_close')
+    _draw_rounded_box(
+        close_x, top_y, close_w, top_h, 12.0 * scale,
+        fill_color=(0.25, 0.15, 0.18, 0.9) if c_hover else (0.12, 0.14, 0.18, 0.7),
+        border_color=(0.8, 0.3, 0.3, 0.6) if c_hover else (0.22, 0.26, 0.33, 0.5),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered("✕", close_x, top_y, close_w, top_h, size=11 * scale, color=(1.0, 0.5, 0.5, 1.0) if c_hover else (0.6, 0.65, 0.72, 1.0))
+
+    # Console Toggle Button
+    con_w = 68.0 * scale
+    con_x = close_x - con_w - 6.0 * scale
+    bounds['btn_console'] = (con_x, top_y, con_w, top_h)
+    con_hover = (hover == 'btn_console')
+    _draw_rounded_box(
+        con_x, top_y, con_w, top_h, 12.0 * scale,
+        fill_color=(0.18, 0.22, 0.30, 0.9) if con_hover else (0.10, 0.12, 0.17, 0.7),
+        border_color=(0.30, 0.40, 0.55, 0.6),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered("🗲 Console", con_x, top_y, con_w, top_h, size=10 * scale, color=(0.85, 0.90, 0.95, 1.0))
+
+    # Scale Zoom Controls: [+] [ 100% ] [-]
+    btn_z_w = 20.0 * scale
+    btn_zp_x = con_x - btn_z_w - 5.0 * scale
+    bounds['scale_up'] = (btn_zp_x, top_y, btn_z_w, top_h)
+    _draw_rounded_box(
+        btn_zp_x, top_y, btn_z_w, top_h, 10.0 * scale,
+        fill_color=(0.18, 0.24, 0.34, 0.9) if hover == 'scale_up' else (0.10, 0.13, 0.18, 0.7),
+        border_color=(0.28, 0.38, 0.55, 0.6),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered("+", btn_zp_x, top_y, btn_z_w, top_h, size=12 * scale, color=(0.9, 0.95, 1.0, 1.0))
+
+    lbl_z_w = 42.0 * scale
+    lbl_z_x = btn_zp_x - lbl_z_w - 3.0 * scale
+    bounds['scale_reset'] = (lbl_z_x, top_y, lbl_z_w, top_h)
+    _draw_rounded_box(
+        lbl_z_x, top_y, lbl_z_w, top_h, 10.0 * scale,
+        fill_color=(0.16, 0.22, 0.30, 0.9) if hover == 'scale_reset' else (0.08, 0.11, 0.16, 0.6),
+        border_color=(0.28, 0.38, 0.55, 0.6),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    pct_text = f"{int(round(scale * 100))}%"
+    _draw_text_centered(pct_text, lbl_z_x, top_y, lbl_z_w, top_h, size=10 * scale, color=(0.75, 0.85, 0.95, 1.0))
+
+    btn_zm_x = lbl_z_x - btn_z_w - 3.0 * scale
+    bounds['scale_down'] = (btn_zm_x, top_y, btn_z_w, top_h)
+    _draw_rounded_box(
+        btn_zm_x, top_y, btn_z_w, top_h, 10.0 * scale,
+        fill_color=(0.18, 0.24, 0.34, 0.9) if hover == 'scale_down' else (0.10, 0.13, 0.18, 0.7),
+        border_color=(0.28, 0.38, 0.55, 0.6),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered("−", btn_zm_x, top_y, btn_z_w, top_h, size=12 * scale, color=(0.9, 0.95, 1.0, 1.0))
+
+    # Mode Tabs (Generate, Sketch, Versions, Settings)
+    tabs = [
+        ('GENERATE', '✦ Generate'),
+        ('SKETCH', '✎ Sketch'),
+        ('HISTORY', '⏱ Versions'),
+        ('SETTINGS', '⚙ Settings'),
+    ]
+    tab_w = 76.0 * scale
+    tabs_start_x = hud_x + (hud_w - 316.0 * scale) / 2.0
+    for i, (tid, tlabel) in enumerate(tabs):
+        tx = tabs_start_x + i * (tab_w + 4.0 * scale)
+        bounds[f'tab_{tid}'] = (tx, top_y, tab_w, top_h)
+        is_active = (active_tab == tid)
+        is_t_hover = (hover == f'tab_{tid}')
+
+        if is_active:
+            _draw_rounded_box(
+                tx, top_y, tab_w, top_h, 12.0 * scale,
+                fill_color=(0.18, 0.26, 0.38, 0.95),
+                border_color=(0.0, 0.75, 1.0, 0.7),
+                border_width=max(0.8, 1.0 * scale),
+            )
+            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=11 * scale, color=(1.0, 1.0, 1.0, 1.0))
+        elif is_t_hover:
+            _draw_rounded_box(
+                tx, top_y, tab_w, top_h, 12.0 * scale,
+                fill_color=(0.13, 0.17, 0.23, 0.9),
+                border_color=(0.30, 0.40, 0.55, 0.6),
+                border_width=max(0.8, 1.0 * scale),
+            )
+            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
+        else:
+            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=11 * scale, color=(0.60, 0.66, 0.75, 1.0))
+
+    # ── 3. Middle Bar: Prompt Field & Main Action Button ──────────────────────
+    mid_y = hud_y + 45.0 * scale
+    mid_h = 38.0 * scale
+
+    btn_w = 136.0 * scale
+    btn_x = hud_x + hud_w - btn_w - 14.0 * scale
+    bounds['btn_action'] = (btn_x, mid_y, btn_w, mid_h)
+    btn_hover = (hover == 'btn_action')
+
+    # Main Action Button
+    if is_running:
+        pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 6.0)
+        c_fill = (0.88 + 0.12 * pulse, 0.22, 0.24, 1.0)
+        _draw_rounded_box(
+            btn_x, mid_y, btn_w, mid_h, 10.0 * scale,
+            fill_color=c_fill,
+            border_color=(1.0, 0.4, 0.4, 0.9),
+            border_width=max(1.0, 1.2 * scale),
+        )
+        _draw_text_centered("✖ STOP TASK", btn_x, mid_y, btn_w, mid_h, size=12 * scale, color=(1.0, 1.0, 1.0, 1.0))
+    else:
+        c_fill = (0.05, 0.62, 0.98, 1.0) if btn_hover else (0.02, 0.50, 0.90, 1.0)
+        c_border = (0.45, 0.88, 1.0, 0.95) if btn_hover else (0.15, 0.65, 0.98, 0.8)
+        _draw_rounded_box(
+            btn_x, mid_y, btn_w, mid_h, 10.0 * scale,
+            fill_color=c_fill,
+            border_color=c_border,
+            border_width=max(1.0, 1.5 * scale),
+        )
+        _draw_text_centered("✦ RUN AGENT", btn_x, mid_y, btn_w, mid_h, size=12 * scale, color=(1.0, 1.0, 1.0, 1.0))
+
+    # Prompt Text Input Box
+    prompt_x = hud_x + 14.0 * scale
+    prompt_w = btn_x - prompt_x - 10.0 * scale
+    bounds['prompt'] = (prompt_x, mid_y, prompt_w, mid_h)
+    is_typing = HUD_STATE['typing']
+
+    p_border = (0.0, 0.82, 1.0, 0.95) if is_typing else (0.18, 0.24, 0.35, 0.7)
+    _draw_rounded_box(
+        prompt_x, mid_y, prompt_w, mid_h, 10.0 * scale,
+        fill_color=(0.04, 0.05, 0.08, 0.95),
+        border_color=p_border,
+        border_width=max(1.0, (1.5 if is_typing else 1.0) * scale),
+    )
+
+    # Clear button inside prompt box
+    prompt_text = getattr(scene, 'archforge_codex_prompt', '').strip()
+    if prompt_text:
+        clear_w = 22.0 * scale
+        clear_x = prompt_x + prompt_w - clear_w - 6.0 * scale
+        clear_y = mid_y + (mid_h - 22.0 * scale) / 2.0
+        bounds['prompt_clear'] = (clear_x, clear_y, clear_w, 22.0 * scale)
+        clr_hover = (hover == 'prompt_clear')
+        _draw_rounded_box(
+            clear_x, clear_y, clear_w, 22.0 * scale, 11.0 * scale,
+            fill_color=(0.20, 0.24, 0.32, 0.9) if clr_hover else (0.12, 0.15, 0.20, 0.7),
+        )
+        _draw_text_centered("✕", clear_x, clear_y, clear_w, 22.0 * scale, size=10 * scale, color=(0.85, 0.90, 0.95, 1.0))
+        max_text_w = prompt_w - 42.0 * scale
+    else:
+        max_text_w = prompt_w - 18.0 * scale
+
+    # Draw Prompt Content or Placeholder
+    text_y = mid_y + 13.0 * scale
+    if not prompt_text and not is_typing:
+        _draw_text("Prompt AI agent to create or modify scene / selected objects...", prompt_x + 12.0 * scale, text_y, size=13 * scale, color=(0.42, 0.48, 0.58, 1.0))
+    else:
+        disp_text = _truncate_left(prompt_text, max_text_w, size=13 * scale)
+        _draw_text(disp_text, prompt_x + 12.0 * scale, text_y, size=13 * scale, color=(0.95, 0.97, 1.0, 1.0))
+
+        if is_typing and (int(time.monotonic() * 2.5) % 2 == 0):
+            font_id = 0
+            blf.size(font_id, max(9, int(13 * scale)))
+            tw, _ = blf.dimensions(font_id, disp_text)
+            _draw_text('|', prompt_x + 12.0 * scale + tw + 2.0 * scale, text_y, size=13 * scale, color=(0.0, 0.85, 1.0, 1.0))
+
+    # ── 4. Bottom Bar: Control Chips ─────────────────────────────────────────
+    bot_y = hud_y + 11.0 * scale
+    chip_h = 25.0 * scale
+    cur_x = hud_x + 14.0 * scale
+
+    # Chip 1: Backend Provider [⬡ Antigravity ⌵]
+    c1_w = 120.0 * scale
+    bounds['chip_backend'] = (cur_x, bot_y, c1_w, chip_h)
+    c1_hover = (hover == 'chip_backend')
+    _draw_rounded_box(
+        cur_x, bot_y, c1_w, chip_h, 12.0 * scale,
+        fill_color=(0.14, 0.18, 0.26, 0.95) if c1_hover else (0.09, 0.12, 0.18, 0.85),
+        border_color=(0.28, 0.38, 0.55, 0.8),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered(f'⬡ {agent_name} ⌵', cur_x, bot_y, c1_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
+    cur_x += c1_w + 6.0 * scale
+
+    # Chip 2: Model [❖ Flash 3.8 ⌵]
+    c2_w = 124.0 * scale
+    bounds['chip_model'] = (cur_x, bot_y, c2_w, chip_h)
+    c2_hover = (hover == 'chip_model')
+    _draw_rounded_box(
+        cur_x, bot_y, c2_w, chip_h, 12.0 * scale,
+        fill_color=(0.14, 0.18, 0.26, 0.95) if c2_hover else (0.09, 0.12, 0.18, 0.85),
+        border_color=(0.28, 0.38, 0.55, 0.8),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered(f'❖ {model_label} ⌵', cur_x, bot_y, c2_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
+    cur_x += c2_w + 6.0 * scale
+
+    # Chip 3: Target Scope [🎯 Selected Only] vs [🌐 Full Scene]
+    c3_w = 132.0 * scale
+    bounds['chip_scope'] = (cur_x, bot_y, c3_w, chip_h)
+    c3_hover = (hover == 'chip_scope')
+    if only_selected:
+        scope_text = '🎯 Selected Only'
+        scope_fill = (0.28, 0.20, 0.08, 0.95)
+        scope_border = (0.95, 0.72, 0.20, 0.9)
+        scope_color = (1.0, 0.85, 0.35, 1.0)
+    else:
+        scope_text = '🌐 Full Scene'
+        scope_fill = (0.14, 0.18, 0.26, 0.95) if c3_hover else (0.09, 0.12, 0.18, 0.85)
+        scope_border = (0.28, 0.38, 0.55, 0.8)
+        scope_color = (0.88, 0.92, 0.98, 1.0)
+
+    _draw_rounded_box(
+        cur_x, bot_y, c3_w, chip_h, 12.0 * scale,
+        fill_color=scope_fill,
+        border_color=scope_border,
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered(scope_text, cur_x, bot_y, c3_w, chip_h, size=11 * scale, color=scope_color)
+    cur_x += c3_w + 6.0 * scale
+
+    # Chip 4: Save Checkpoint [💾 Checkpoint]
+    c4_w = 110.0 * scale
+    bounds['chip_checkpoint'] = (cur_x, bot_y, c4_w, chip_h)
+    c4_hover = (hover == 'chip_checkpoint')
+    _draw_rounded_box(
+        cur_x, bot_y, c4_w, chip_h, 12.0 * scale,
+        fill_color=(0.14, 0.18, 0.26, 0.95) if c4_hover else (0.09, 0.12, 0.18, 0.85),
+        border_color=(0.28, 0.38, 0.55, 0.8),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered("💾 Checkpoint", cur_x, bot_y, c4_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
+    cur_x += c4_w + 6.0 * scale
+
+    # Chip 5: Sketch Viewport [✎ Sketch]
+    c5_w = 94.0 * scale
+    bounds['chip_sketch'] = (cur_x, bot_y, c5_w, chip_h)
+    c5_hover = (hover == 'chip_sketch')
+    _draw_rounded_box(
+        cur_x, bot_y, c5_w, chip_h, 12.0 * scale,
+        fill_color=(0.14, 0.18, 0.26, 0.95) if c5_hover else (0.09, 0.12, 0.18, 0.85),
+        border_color=(0.28, 0.38, 0.55, 0.8),
+        border_width=max(0.8, 1.0 * scale),
+    )
+    _draw_text_centered("✎ Sketch", cur_x, bot_y, c5_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
+    cur_x += c5_w + 6.0 * scale
+
+    # Chip 6: Quick Preset Suggestions [+ Preset ⌵]
+    c6_w = 94.0 * scale
+    if cur_x + c6_w < hud_x + hud_w - 30.0 * scale:
+        bounds['chip_preset'] = (cur_x, bot_y, c6_w, chip_h)
+        c6_hover = (hover == 'chip_preset')
+        _draw_rounded_box(
+            cur_x, bot_y, c6_w, chip_h, 12.0 * scale,
+            fill_color=(0.14, 0.18, 0.26, 0.95) if c6_hover else (0.09, 0.12, 0.18, 0.85),
+            border_color=(0.28, 0.38, 0.55, 0.8),
+            border_width=max(0.8, 1.0 * scale),
+        )
+        _draw_text_centered("+ Preset ⌵", cur_x, bot_y, c6_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
+
+    # Flash notification message
+    now = time.monotonic()
+    if HUD_STATE['flash_msg'] and (now - HUD_STATE['flash_time'] < 2.5):
+        msg = HUD_STATE['flash_msg']
+        fw = 180.0 * scale
+        fx = hud_x + (hud_w - fw) / 2.0
+        fy = hud_y + hud_h + 8.0 * scale
+        _draw_rounded_box(
+            fx, fy, fw, 26.0 * scale, 13.0 * scale,
+            fill_color=(0.04, 0.15, 0.10, 0.95),
+            border_color=(0.1, 0.9, 0.45, 0.8),
+            border_width=max(0.8, 1.0 * scale),
+        )
+        _draw_text_centered(msg, fx, fy, fw, 26.0 * scale, size=11 * scale, color=(0.3, 1.0, 0.6, 1.0))
+
+    HUD_STATE['bounds'] = bounds
+
+
+# ── Interactive Modal Controller ────────────────────────────────────────────
+
+class AF_OT_ViewportHUDModal(bpy.types.Operator):
+    """Interactive controller for the ArchForge 3D Viewport floating AI command bar."""
+    bl_idname = 'archforge.viewport_hud_modal'
+    bl_label = 'ArchForge Viewport HUD'
+
+    def modal(self, context, event):
+        scene = getattr(context, 'scene', None)
+        if not scene or not getattr(scene, 'archforge_show_viewport_hud', False):
+            HUD_STATE['modal_active'] = False
+            HUD_STATE['typing'] = False
+            HUD_STATE['dragging'] = None
+            return {'CANCELLED'}
+
+        # Find the VIEW_3D area and WINDOW region containing the cursor
+        mx, my = event.mouse_x, event.mouse_y
+        target_area = None
+        target_region = None
+
+        if context.screen:
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    if (area.x <= mx <= area.x + area.width and
+                            area.y <= my <= area.y + area.height):
+                        for r in area.regions:
+                            if r.type == 'WINDOW' and (r.x <= mx <= r.x + r.width and r.y <= my <= r.y + r.height):
+                                target_area = area
+                                target_region = r
+                                break
+                        if target_region:
+                            break
+
+        if not target_region:
+            return {'PASS_THROUGH'}
+
+        rx = mx - target_region.x
+        ry = my - target_region.y
+        HUD_STATE['last_mouse'] = (rx, ry)
+
+        bounds = HUD_STATE.get('bounds', {})
+        total_bounds = bounds.get('total')
+
+        def is_inside(rect):
+            if not rect:
+                return False
+            x0, y0, w0, h0 = rect
+            return (x0 <= rx <= x0 + w0) and (y0 <= ry <= y0 + h0)
+
+        # ── Handle Ongoing Drag (Resize or Move) ─────────────────────────────
+        dragging = HUD_STATE.get('dragging')
+        if dragging:
+            if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+                HUD_STATE['dragging'] = None
+                target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            if event.type in ('MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'):
+                scale = getattr(scene, 'archforge_hud_scale', 1.0)
+                start_mx, start_my = HUD_STATE['drag_start_mouse']
+
+                if dragging in ('resize_right', 'resize_corner'):
+                    dx = (mx - start_mx) / scale
+                    new_w = max(500, min(1400, int(HUD_STATE['drag_start_width'] + dx * 2.0)))
+                    scene.archforge_hud_width = new_w
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                elif dragging == 'resize_left':
+                    dx = (start_mx - mx) / scale
+                    new_w = max(500, min(1400, int(HUD_STATE['drag_start_width'] + dx * 2.0)))
+                    scene.archforge_hud_width = new_w
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                elif dragging == 'move':
+                    dx = mx - start_mx
+                    dy = my - start_my
+                    off_x, off_y = HUD_STATE['drag_start_offset']
+                    scene.archforge_hud_x_offset = off_x + dx
+                    scene.archforge_hud_y_offset = off_y + dy
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+        # ── Mouse Wheel Zoom / Scale (Ctrl + Wheel) ─────────────────────────
+        if event.ctrl and is_inside(total_bounds):
+            if event.type == 'WHEELUPMOUSE':
+                cur = getattr(scene, 'archforge_hud_scale', 1.0)
+                scene.archforge_hud_scale = min(1.6, round(cur + 0.05, 2))
+                target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            elif event.type == 'WHEELDOWNMOUSE':
+                cur = getattr(scene, 'archforge_hud_scale', 1.0)
+                scene.archforge_hud_scale = max(0.65, round(cur - 0.05, 2))
+                target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+        # ── Mouse Hover Tracking ────────────────────────────────────────────
+        if is_inside(total_bounds):
+            new_hover = None
+            # Prioritize interactive buttons and resize handles
+            check_keys = (
+                'resize_corner', 'resize_left', 'resize_right',
+                'btn_action', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
+                'scale_up', 'scale_down', 'scale_reset',
+                'chip_backend', 'chip_model', 'chip_scope', 'chip_checkpoint',
+                'chip_sketch', 'chip_preset',
+                'tab_GENERATE', 'tab_SKETCH', 'tab_HISTORY', 'tab_SETTINGS',
+                'header_drag',
+            )
+            for key in check_keys:
+                if is_inside(bounds.get(key)):
+                    new_hover = key
+                    break
+
+            if new_hover != HUD_STATE.get('hover'):
+                HUD_STATE['hover'] = new_hover
+                target_area.tag_redraw()
+        else:
+            if HUD_STATE.get('hover'):
+                HUD_STATE['hover'] = None
+                target_area.tag_redraw()
+
+        # ── Text Input / Typing Mode ────────────────────────────────────────
+        if HUD_STATE.get('typing'):
+            if event.type in ('LEFTMOUSE', 'RIGHTMOUSE') and event.value == 'PRESS':
+                if not is_inside(bounds.get('prompt')):
+                    HUD_STATE['typing'] = False
+                    target_area.tag_redraw()
+
+            elif event.type == 'ESC' and event.value == 'PRESS':
+                HUD_STATE['typing'] = False
+                target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            elif event.type in ('RET', 'NUMPAD_ENTER') and event.value == 'PRESS':
+                HUD_STATE['typing'] = False
+                if context.scene.archforge_codex_prompt.strip():
+                    bpy.ops.archforge.send_to_agent()
+                target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            elif event.type == 'BACKSPACE' and event.value == 'PRESS':
+                cur = context.scene.archforge_codex_prompt
+                if cur:
+                    context.scene.archforge_codex_prompt = cur[:-1]
+                    target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            elif event.type == 'SPACE' and event.value == 'PRESS':
+                context.scene.archforge_codex_prompt += ' '
+                target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            elif event.ascii and event.value == 'PRESS':
+                context.scene.archforge_codex_prompt += event.ascii
+                target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            if event.type not in ('MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'):
+                return {'RUNNING_MODAL'}
+
+        # ── Click & Drag Initiations on Floating Elements ────────────────────
+        if is_inside(total_bounds):
+            if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+                # 1. Resize handles initiation
+                for rkey in ('resize_corner', 'resize_right', 'resize_left'):
+                    if is_inside(bounds.get(rkey)):
+                        HUD_STATE['dragging'] = rkey
+                        HUD_STATE['drag_start_mouse'] = (mx, my)
+                        HUD_STATE['drag_start_width'] = float(scene.archforge_hud_width)
+                        HUD_STATE['drag_start_scale'] = float(scene.archforge_hud_scale)
+                        target_area.tag_redraw()
+                        return {'RUNNING_MODAL'}
+
+                # 2. Scale Zoom Buttons (+/- and reset)
+                if is_inside(bounds.get('scale_up')):
+                    cur = getattr(scene, 'archforge_hud_scale', 1.0)
+                    scene.archforge_hud_scale = min(1.6, round(cur + 0.1, 2))
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                if is_inside(bounds.get('scale_down')):
+                    cur = getattr(scene, 'archforge_hud_scale', 1.0)
+                    scene.archforge_hud_scale = max(0.65, round(cur - 0.1, 2))
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                if is_inside(bounds.get('scale_reset')):
+                    scene.archforge_hud_scale = 1.0
+                    scene.archforge_hud_width = 780
+                    scene.archforge_hud_x_offset = 0.0
+                    scene.archforge_hud_y_offset = 0.0
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 3. Action Button (Run Agent / Cancel)
+                if is_inside(bounds.get('btn_action')):
+                    from . import bridge_ui
+                    is_running = bool(bridge_ui.STATE.get('agent_process') or bridge_ui.STATE.get('codex_process'))
+                    if is_running:
+                        bpy.ops.archforge.cancel_agent()
+                    else:
+                        HUD_STATE['typing'] = False
+                        bpy.ops.archforge.send_to_agent()
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 4. Prompt Input Area (Focus typing)
+                if is_inside(bounds.get('prompt')):
+                    if is_inside(bounds.get('prompt_clear')):
+                        context.scene.archforge_codex_prompt = ''
+                        HUD_STATE['typing'] = False
+                    else:
+                        HUD_STATE['typing'] = True
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 5. Clear prompt button
+                if is_inside(bounds.get('prompt_clear')):
+                    context.scene.archforge_codex_prompt = ''
+                    HUD_STATE['typing'] = False
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 6. Backend Chip (Toggle Antigravity / Codex)
+                if is_inside(bounds.get('chip_backend')):
+                    cur = context.scene.archforge_agent_backend
+                    context.scene.archforge_agent_backend = 'CODEX' if cur == 'ANTIGRAVITY' else 'ANTIGRAVITY'
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 7. Model Chip (Cycle model options)
+                if is_inside(bounds.get('chip_model')):
+                    agent = context.scene.archforge_agent_backend
+                    if agent == 'ANTIGRAVITY':
+                        cur = context.scene.archforge_antigravity_model
+                        keys = [k for k, _ in MODELS_ANTIGRAVITY]
+                        idx = (keys.index(cur) + 1) % len(keys) if cur in keys else 0
+                        context.scene.archforge_antigravity_model = keys[idx]
+                    else:
+                        cur = context.scene.archforge_codex_model
+                        keys = [k for k, _ in MODELS_CODEX]
+                        idx = (keys.index(cur) + 1) % len(keys) if cur in keys else 0
+                        context.scene.archforge_codex_model = keys[idx]
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 8. Target Scope Chip (Selected Only vs Full Scene)
+                if is_inside(bounds.get('chip_scope')):
+                    context.scene.archforge_only_selected = not context.scene.archforge_only_selected
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 9. Checkpoint Chip (Save Version immediately)
+                if is_inside(bounds.get('chip_checkpoint')):
+                    bpy.ops.archforge.checkpoint()
+                    HUD_STATE['flash_msg'] = '✔ Checkpoint saved!'
+                    HUD_STATE['flash_time'] = time.monotonic()
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 10. Sketch Chip (Start Viewport Sketching)
+                if is_inside(bounds.get('chip_sketch')):
+                    bpy.ops.archforge.draw_viewport_sketch()
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 11. Preset Suggestions (+ Tag)
+                if is_inside(bounds.get('chip_preset')):
+                    preset = PRESETS[HUD_STATE['preset_idx'] % len(PRESETS)]
+                    HUD_STATE['preset_idx'] += 1
+                    cur = context.scene.archforge_codex_prompt.strip()
+                    if not cur:
+                        context.scene.archforge_codex_prompt = preset
+                    elif preset.lower() not in cur.lower():
+                        context.scene.archforge_codex_prompt = f"{cur}, {preset}"
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 12. Header Mode Tabs (Generate, Sketch, Versions, Settings)
+                for tid in ('GENERATE', 'SKETCH', 'HISTORY', 'SETTINGS'):
+                    if is_inside(bounds.get(f'tab_{tid}')):
+                        context.scene.archforge_ui_tab = tid
+                        target_area.tag_redraw()
+                        return {'RUNNING_MODAL'}
+
+                # 13. Console Toggle Button
+                if is_inside(bounds.get('btn_console')):
+                    if hasattr(bpy.ops.wm, 'console_toggle'):
+                        bpy.ops.wm.console_toggle()
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # 14. Close Button
+                if is_inside(bounds.get('btn_close')):
+                    context.scene.archforge_show_viewport_hud = False
+                    HUD_STATE['modal_active'] = False
+                    HUD_STATE['typing'] = False
+                    target_area.tag_redraw()
+                    return {'CANCELLED'}
+
+                # 15. Header Drag-to-Move initiation
+                if is_inside(bounds.get('header_drag')):
+                    HUD_STATE['dragging'] = 'move'
+                    HUD_STATE['drag_start_mouse'] = (mx, my)
+                    HUD_STATE['drag_start_offset'] = (
+                        float(getattr(scene, 'archforge_hud_x_offset', 0.0)),
+                        float(getattr(scene, 'archforge_hud_y_offset', 0.0))
+                    )
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                return {'RUNNING_MODAL'}
+
+        return {'PASS_THROUGH'}
+
+    def execute(self, context):
+        return self._start_modal(context)
+
+    def invoke(self, context, event):
+        return self._start_modal(context)
+
+    def _start_modal(self, context):
+        if HUD_STATE['modal_active']:
+            return {'CANCELLED'}
+        HUD_STATE['modal_active'] = True
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+
+# ── Registration & Lifecycle ────────────────────────────────────────────────
+
+def register_hud():
+    """Register the viewport 2D draw handler."""
+    if HUD_STATE['handler'] is None:
+        HUD_STATE['handler'] = bpy.types.SpaceView3D.draw_handler_add(
+            draw_viewport_hud, (), 'WINDOW', 'POST_PIXEL'
+        )
+
+
+def unregister_hud():
+    """Unregister the viewport 2D draw handler."""
+    if HUD_STATE['handler'] is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(HUD_STATE['handler'], 'WINDOW')
+        HUD_STATE['handler'] = None
+    HUD_STATE['modal_active'] = False
+    HUD_STATE['typing'] = False
+    HUD_STATE['dragging'] = None
+
+
+def ensure_hud_modal():
+    """Launch the modal operator if the HUD is enabled and modal isn't running yet."""
+    if HUD_STATE.get('modal_active'):
+        return
+    scene = getattr(bpy.context, 'scene', None)
+    if not scene or not getattr(scene, 'archforge_show_viewport_hud', False):
+        return
+
+    wm = getattr(bpy.context, 'window_manager', None)
+    if not wm or not wm.windows:
+        return
+    win = wm.windows[0]
+    for area in win.screen.areas:
+        if area.type == 'VIEW_3D':
+            for region in area.regions:
+                if region.type == 'WINDOW':
+                    try:
+                        with bpy.context.temp_override(window=win, area=area, region=region):
+                            bpy.ops.archforge.viewport_hud_modal('EXEC_DEFAULT')
+                    except Exception as e:
+                        pass
+                    return
