@@ -36,7 +36,7 @@ with (root/'runtime.log').open('w') as log,(root/'blender.log').open('w') as blo
             assert job['status']=='complete',job
             return job['result']
         scene=run('inspect');assert scene['total']==3
-        edit=run('execute',dict(code="bpy.ops.mesh.primitive_monkey_add(location=(0,0,4))\nbpy.context.object.name='Live sculpture'\nresult={'name':bpy.context.object.name}",label='Live sculpture'))
+        edit=run('execute',dict(code="bpy.ops.mesh.primitive_monkey_add(location=(0,0,4))\nbpy.context.object.name='Live sculpture'\nresult={'name':bpy.context.object.name}",label='Live sculpture',save_checkpoint=True))
         assert edit['result']['name']=='Live sculpture'
         assert len(run('versions'))==2
         run('restore',{'version_id':edit['before']['version_id']})
