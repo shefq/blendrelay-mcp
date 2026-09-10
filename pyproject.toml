@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archforge-mcp"
+version = "0.2.3"
+description = "Local architectural modeling tools and a procedural Blender extension"
+requires-python = ">=3.11"
+readme = "README.md"
+license = {text = "MIT AND GPL-3.0-or-later"}
+dependencies = []
+
+[project.scripts]
+archforge-mcp = "archforge_mcp.cli:main"
+archforge-runtime = "archforge_runtime.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+archforge_blender = ["*.py", "blender_manifest.toml", "COPYING.txt"]

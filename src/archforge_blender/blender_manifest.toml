@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+id = "archforge_mcp"
+version = "0.2.3"
+name = "ArchForge MCP"
+tagline = "Create any Blender content with MCP and scene versions"
+maintainer = "ArchForge MCP contributors"
+type = "add-on"
+tags = ["3D View", "Add Mesh"]
+blender_version_min = "4.5.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Connect to the local ArchForge runtime"
+files = "Read local runtime discovery and save editable project snapshots"
