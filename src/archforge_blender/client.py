@@ -2,6 +2,8 @@
 """Nonblocking main-thread client. No persistent threads in Blender."""
 import json
 import os
+import errno
+import select
 import socket
 import struct
 import time
@@ -15,16 +17,21 @@ def default_root():return str(Path(os.environ.get('ARCHFORGE_DATA_DIR',Path(os.e
 
 class Connection:
     def __init__(self,root):
-        self.root=Path(root);self.sock=None;self.buffer=bytearray();self.out=bytearray();self.pending={};self.sequence=0
+        self.root=Path(root);self.sock=None;self.connecting=False;self.buffer=bytearray();self.out=bytearray();self.pending={};self.sequence=0
 
     def close(self):
         if self.sock:self.sock.close()
-        self.sock=None;self.buffer.clear();self.out.clear();self.pending.clear()
+        self.sock=None;self.connecting=False;self.buffer.clear();self.out.clear();self.pending.clear()
 
     def request(self,method,params,callback):
         if self.sock is None:
-            config=json.loads((self.root/'connection.json').read_text());self.token=config['token']
-            self.sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM);self.sock.setblocking(False);self.sock.connect_ex(('127.0.0.1',config['port']))
+            try:config=json.loads((self.root/'connection.json').read_text());self.token=config['token'];port=int(config['port'])
+            except (FileNotFoundError,json.JSONDecodeError,KeyError,TypeError,ValueError):raise ConnectionError('ArchForge runtime is unavailable. Start it, then click Connect / Refresh.')
+            self.sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM);self.sock.setblocking(False)
+            status=self.sock.connect_ex(('127.0.0.1',port))
+            if status not in (0,errno.EINPROGRESS,errno.EWOULDBLOCK,errno.EALREADY,10035,10036):
+                self.close();raise ConnectionError('ArchForge runtime rejected the connection. Click Connect / Refresh after it is ready.')
+            self.connecting=status!=0
         self.sequence+=1;rid=str(self.sequence)
         data=json.dumps({'protocol_version':1,'request_id':rid,'token':self.token,'method':method,'params':params},ensure_ascii=True).encode()
         if len(data)>MAX_FRAME:raise RuntimeError('Request exceeds 1 MiB')
@@ -33,10 +40,20 @@ class Connection:
     def tick(self):
         if not self.sock:return
         if any(time.monotonic()-start>35 for _,start in self.pending.values()):raise TimeoutError('Runtime response timed out; reconnect to inspect the outcome')
+        if self.connecting:
+            _,writable,failed=select.select([], [self.sock], [self.sock], 0)
+            if failed or writable:
+                error=self.sock.getsockopt(socket.SOL_SOCKET,socket.SO_ERROR)
+                if error:
+                    raise ConnectionError('ArchForge runtime is unavailable. Click Connect / Refresh after it is ready.')
+                self.connecting=False
+            else:
+                return
         if self.out:
             try:
                 sent=self.sock.send(self.out);del self.out[:sent]
             except BlockingIOError:pass
+            except OSError as e:raise ConnectionError('Lost connection to the ArchForge runtime.') from e
         # Bounded IO per timer tick.
         for _ in range(4):
             try:part=self.sock.recv(65536)
