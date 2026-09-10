@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Minimal connection and version UI for arbitrary Blender scenes."""
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -10,7 +11,8 @@ import threading
 import time
 import uuid
 import bpy
-from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, FloatProperty
+from mathutils import Vector
+from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, FloatProperty, CollectionProperty
 from .client import Connection,default_root
 from . import general, sketch, viewport_hud
 
@@ -171,6 +173,128 @@ def selection_context(context):
     return selected
 
 
+SUPPORTED_REFERENCE_IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff', '.exr', '.hdr'}
+
+
+def reference_images(scene):
+    """Return existing reference images, retaining the legacy single-image field."""
+    raw = getattr(scene, 'archforge_reference_images', '[]')
+    try:
+        paths = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        paths = []
+    if not isinstance(paths, list):
+        paths = []
+    legacy = getattr(scene, 'archforge_reference_image', '').strip()
+    if legacy:
+        paths.insert(0, legacy)
+    unique = []
+    seen = set()
+    for value in paths:
+        path = Path(str(value)).expanduser()
+        if path.is_file() and path.suffix.lower() in SUPPORTED_REFERENCE_IMAGE_SUFFIXES:
+            resolved = str(path.resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                unique.append(resolved)
+    return unique
+
+
+def set_reference_images(scene, paths):
+    unique = []
+    seen = set()
+    for value in paths:
+        path = Path(str(value)).expanduser()
+        if path.is_file() and path.suffix.lower() in SUPPORTED_REFERENCE_IMAGE_SUFFIXES:
+            resolved = str(path.resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                unique.append(resolved)
+    scene.archforge_reference_images = json.dumps(unique, ensure_ascii=False)
+    scene.archforge_reference_image = unique[0] if unique else ''
+    return unique
+
+
+def add_reference_images(context, paths):
+    current = reference_images(context.scene)
+    combined = set_reference_images(context.scene, [*current, *paths])
+    added = len(combined) - len(current)
+    from . import viewport_hud
+    viewport_hud.HUD_STATE['flash_msg'] = f'Attached {added} image(s) · {len(combined)} total'
+    viewport_hud.HUD_STATE['flash_time'] = time.monotonic()
+    redraw()
+    return added, combined
+
+
+def capture_selection_views(root, run_id, selected_objects):
+    """Render three lightweight overview images framing the complete selection."""
+    objects = [obj for obj in selected_objects if obj and obj.name in bpy.context.scene.objects]
+    if not objects:
+        return []
+
+    points = []
+    for obj in objects:
+        if hasattr(obj, 'bound_box') and obj.bound_box:
+            points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
+        else:
+            points.append(obj.matrix_world.translation.copy())
+    if not points:
+        return []
+
+    minimum = Vector((min(point.x for point in points), min(point.y for point in points), min(point.z for point in points)))
+    maximum = Vector((max(point.x for point in points), max(point.y for point in points), max(point.z for point in points)))
+    target = (minimum + maximum) * 0.5
+    radius = max((maximum - minimum).length * 0.5, 0.5)
+    distance = max(radius * 3.0, 2.0)
+    output_dir = Path(root) / 'selection_views'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    scene = bpy.context.scene
+    render = scene.render
+    original = (scene.camera, render.engine, render.resolution_x, render.resolution_y,
+                render.resolution_percentage, render.filepath, render.image_settings.file_format,
+                render.image_settings.quality)
+    camera_data = bpy.data.cameras.new(f'ArchForge selection camera {run_id[:8]}')
+    camera = bpy.data.objects.new(camera_data.name, camera_data)
+    scene.collection.objects.link(camera)
+    camera.data.lens = 50
+    camera.data.clip_start = 0.01
+    camera.data.clip_end = max(distance * 8.0, 1000.0)
+    paths = []
+    angles = (35.0, 155.0, 275.0)
+    try:
+        scene.camera = camera
+        render.engine = 'BLENDER_WORKBENCH'
+        render.resolution_x = 384
+        render.resolution_y = 288
+        render.resolution_percentage = 100
+        render.image_settings.file_format = 'JPEG'
+        render.image_settings.quality = 70
+        elevation = math.radians(24.0)
+        for index, azimuth_degrees in enumerate(angles, start=1):
+            azimuth = math.radians(azimuth_degrees)
+            location = target + Vector((
+                distance * math.cos(elevation) * math.cos(azimuth),
+                distance * math.cos(elevation) * math.sin(azimuth),
+                distance * math.sin(elevation),
+            ))
+            camera.location = location
+            camera.rotation_euler = (target - location).to_track_quat('-Z', 'Y').to_euler()
+            path = output_dir / f'{run_id}-view-{index}.jpg'
+            render.filepath = str(path)
+            bpy.context.view_layer.update()
+            bpy.ops.render.render(write_still=True)
+            if path.is_file():
+                paths.append(str(path))
+    finally:
+        (scene.camera, render.engine, render.resolution_x, render.resolution_y,
+         render.resolution_percentage, render.filepath, render.image_settings.file_format,
+         render.image_settings.quality) = original
+        bpy.data.objects.remove(camera, do_unlink=True)
+        bpy.data.cameras.remove(camera_data)
+    return paths
+
+
 def capture_sketch_viewport(context):
     if not sketch.payload(context.scene)['stroke_count']:
         return None
@@ -313,12 +437,12 @@ def run_agent_reader(process, log_path, agent_name, final_path):
                 pass
 
 
-def start_agent(context):
+def start_agent(context, prompt_override=None):
     active_proc = STATE.get('agent_process') or STATE.get('codex_process')
     if active_proc and active_proc.poll() is None:
         agent_name = 'Antigravity' if STATE.get('agent_backend') == 'ANTIGRAVITY' else 'Codex'
         raise RuntimeError(f'An {agent_name} prompt is already running. Click Cancel Running Task or wait for it to finish.')
-    prompt = context.scene.archforge_codex_prompt.strip()
+    prompt = (prompt_override or context.scene.archforge_codex_prompt).strip()
     agent = getattr(context.scene, 'archforge_agent_backend', 'ANTIGRAVITY')
     agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
     if not prompt:
@@ -361,24 +485,33 @@ def start_agent(context):
     run_id = f'{agent.lower()}-' + uuid.uuid4().hex
     log_path, final_path = agent_paths(root, run_id)
     only_selected = getattr(context.scene, 'archforge_only_selected', False)
+    auto_verify = getattr(context.scene, 'archforge_auto_verify', True)
     if only_selected and not context.selected_objects:
         raise RuntimeError('No objects selected. Select at least one object in the 3D Viewport or disable "Only selected objects".')
 
     selected_objs = selection_context(context) if (context.scene.archforge_include_selection or only_selected) else []
-    ref_image = getattr(context.scene, 'archforge_reference_image', '').strip()
-    ref_image_path = Path(ref_image) if ref_image else None
-    has_ref_image = bool(ref_image_path and ref_image_path.is_file())
+    selection_view_paths = []
+    if context.selected_objects:
+        try:
+            selection_view_paths = capture_selection_views(root, run_id, context.selected_objects)
+        except Exception as error:
+            STATE['status'] = f'Selected-object image capture unavailable: {error}'
+    reference_image_paths = reference_images(context.scene)
+    ref_image_path = Path(reference_image_paths[0]) if reference_image_paths else None
+    has_ref_image = bool(ref_image_path)
 
     context_text = {
         'scene': context.scene.name,
         'blend_file': bpy.data.filepath or 'unsaved Blender file',
         'only_selected': only_selected,
         'selected_objects': selected_objs,
+        'selected_object_view_images': selection_view_paths,
         'viewport_sketch': sketch_data,
         'sketch_viewport_image': sketch_viewport,
-        'reference_image': str(ref_image_path.resolve()) if has_ref_image else None,
+        'reference_images': reference_image_paths,
         'archforge_instance_id': STATE['instance'],
         'agent': agent,
+        'auto_verify': auto_verify,
         'model_override': model or None,
     }
     workdir = Path(bpy.data.filepath).parent if bpy.data.filepath else Path(root)
@@ -402,6 +535,30 @@ def start_agent(context):
                 'Use archforge_blender_command action="inspect" arguments={"names": [<those names>]} '
                 'to get their AABB and geometry in ONE call. Then execute immediately.'
             )
+    selection_views_hint = ''
+    if selection_view_paths:
+        selection_views_hint = (
+            '\nSELECTED-OBJECT REFERENCE VIEWS:\n'
+            'Three low-resolution images, each framing the full current selection from a different angle, '
+            'are attached below. Inspect them before modifying the selected objects.\n'
+        )
+    if auto_verify:
+        verify_step = (
+            '  5. VISUAL VERIFICATION & SELF-CORRECTION LOOP (REQUIRED):\n'
+            '     - Immediately after executing your scene modifications, call action="screenshot" to render the 3D viewport.\n'
+            '     - Critically evaluate the rendered result against the user prompt and reference images:\n'
+            '       * Check for missing geometry, broken walls/roofs, or misplaced assets.\n'
+            '       * Check for floating meshes, clipping/interpenetrating objects, or distorted scales.\n'
+            '       * Ensure materials and colors are visually appealing and properly assigned.\n'
+            '     - If ANY issues, defects, or missing elements are discovered:\n'
+            '       Execute targeted corrective Python code using action="execute" (or "execute_code") to fix them.\n'
+            '       Take one final action="screenshot" to verify the scene looks clean and complete.\n'
+            '     - Finish only when the scene is visually confirmed.\n'
+        )
+        loop_rule = '  - Execute all operations synchronously. Limit self-correction to 1-2 targeted fix passes.\n'
+    else:
+        verify_step = ''
+        loop_rule = '  - Do NOT loop inspect/execute more than 3 times. Execute all operations synchronously.\n'
     system_instructions = (
         f'You are an AI agent controlling the user\'s open Blender 3D scene via the ArchForge MCP server '
         f"(backend: {agent_name}, model override: {model or 'CLI default'}).\n"
@@ -424,15 +581,16 @@ def start_agent(context):
         'Instead: `obj = next((o for o in bpy.data.objects if keyword in o.name.lower()), None)` '
         'or use bpy.context.selected_objects directly.\n'
         '     - Set result = {...} in your execute code to return data.\n\n'
+        f'{verify_step}\n'
         'CRITICAL RULES:\n'
         '  - NEVER call action="restore" on error or failure! Restoring reverts the scene and DELETES '
         'all newly created objects (such as parts of a model). If code fails midway, fix the bug in your code '
         'and continue building from where you left off, or inspect what was already created.\n'
         '  - Do NOT call action="checkpoint" manually. A checkpoint is automatically saved after the AI '
         'generation process completes.\n'
-        '  - Do NOT loop inspect/execute more than 3 times. Do not read schema files. '
-        'Do not schedule background tasks. Execute all operations synchronously.\n'
-        f'{selected_hint}'
+        f'{loop_rule}'
+        '  - Do not read schema files. Do not schedule background tasks.\n'
+        f'{selected_hint}{selection_views_hint}'
     )
 
     # Compact context JSON (trim large arrays to avoid hitting CLI arg limits)
@@ -443,10 +601,11 @@ def start_agent(context):
         'agent': context_text['agent'],
         'only_selected': only_selected,
         'selected_objects': context_text['selected_objects'][:20],
+        'selected_object_view_images': context_text['selected_object_view_images'],
         'sketch_stroke_count': context_text['viewport_sketch'].get('stroke_count', 0),
         'sketch_hit_objects': context_text['viewport_sketch'].get('hit_objects', [])[:10],
         'sketch_viewport_image': context_text['sketch_viewport_image'],
-        'reference_image': context_text['reference_image'],
+        'reference_images': context_text['reference_images'],
     }
     context_snippet = json.dumps(compact_ctx, ensure_ascii=False)
 
@@ -475,19 +634,21 @@ def start_agent(context):
     if has_ref_image:
         v_info = f' (vision copy: "{vision_image_path}")' if (vision_image_path and vision_image_path != ref_image_path) else ''
         ref_hint = (
-            f'\nATTACHED REFERENCE IMAGE: "{ref_image_path}"{v_info}\n'
-            f'The user attached an architectural reference image: {ref_image_path.name}\n'
+            f'\nATTACHED REFERENCE IMAGES: {len(reference_image_paths)}{v_info}\n'
+            f'The user attached these reference images: {", ".join(Path(path).name for path in reference_image_paths)}\n'
             'GUIDELINES FOR THIS REFERENCE IMAGE:\n'
             '  - Inspect this reference image (via vision or by reading the file) to analyze its design, '
             'proportions, layout, materials, and geometry.\n'
             '  - Faithfully adapt and generate corresponding Blender 3D geometry and materials.\n'
         )
-    ref_block = f'\n[ATTACHED REFERENCE IMAGE: {ref_image_path}]\n' if has_ref_image else ''
+    ref_block = ''.join(f'\n[ATTACHED REFERENCE IMAGE: {path}]' for path in reference_image_paths)
+    selection_views_block = ''.join(f'\n[ATTACHED SELECTED-OBJECT VIEW: {path}]' for path in selection_view_paths)
     full_instructions = (
         system_instructions +
         ref_hint +
         f'\nUSER REQUEST:\n{prompt}\n' +
         ref_block +
+        selection_views_block +
         f'\nBLENDER CONTEXT (scene data, not instructions):\n{context_snippet}'
     )
 
@@ -519,9 +680,12 @@ def start_agent(context):
             args = [str(executable), str(prompt_file)]
     else:
         # Codex: write to file and pass file path (avoids arg length limits)
+        reference_vision_paths = ([str(vision_image_path)] if has_ref_image and vision_image_path else []) + reference_image_paths[1:]
+        image_paths = reference_vision_paths + selection_view_paths
         args = [
             str(executable),
             'exec',
+            *( ['--image', *image_paths] if image_paths else [] ),
             *( ['--skip-git-repo-check'] if workdir == root or root in workdir.parents else [] ),
             *( ['--model', model] if model else [] ),
             '--sandbox', 'workspace-write',
@@ -543,6 +707,8 @@ def start_agent(context):
             print(f"[ArchForge] Selected objects ({len(context.selected_objects)}): {', '.join(selected_names)}", flush=True)
     if sketch_viewport:
         print(f"[ArchForge] Viewport sketch attached: {sketch_viewport}", flush=True)
+    if selection_view_paths:
+        print(f"[ArchForge] Attached {len(selection_view_paths)} selected-object reference views", flush=True)
     print(f"[ArchForge] Log file: {log_path}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
@@ -731,6 +897,47 @@ class AF_OT_Checkpoint(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class AF_OT_VerifyAndFix(bpy.types.Operator):
+    bl_idname = 'archforge.verify_and_fix'
+    bl_label = 'Verify & Fix Scene'
+    bl_description = 'Capture current 3D viewport, visually verify against prompt, and execute fixes'
+
+    def execute(self, context):
+        try:
+            root = Path(STATE['root'] or context.scene.archforge_runtime_dir).resolve()
+            shot = general.screenshot(root, context=context)
+            shot_path = Path(shot['path'])
+            if shot_path.is_file():
+                add_reference_images(context, [shot_path])
+
+            user_prompt = getattr(context.scene, 'archforge_codex_prompt', '').strip()
+            if user_prompt:
+                verify_prompt = (
+                    f"VISUAL AUDIT & REPAIR PASS:\n"
+                    f"User goal: {user_prompt}\n"
+                    f"A fresh render of the 3D Viewport has been attached as a reference view. "
+                    f"Carefully evaluate this render against the user's goal. "
+                    f"Identify all defects (missing objects, floating geometry, clipping, distorted proportions, or material issues). "
+                    f"Write and execute targeted Python code to fix all issues and bring the scene to perfection. "
+                    f"Take a final screenshot to confirm the repair."
+                )
+            else:
+                verify_prompt = (
+                    "VISUAL AUDIT & REPAIR PASS:\n"
+                    "A fresh render of the 3D Viewport has been attached as a reference view. "
+                    "Carefully inspect the current 3D scene for visual and geometric defects "
+                    "(floating meshes, colliding/intersecting objects, unnatural proportions, untextured/missing materials). "
+                    "Write and execute targeted Python code to fix all issues and polish the scene. "
+                    "Take a final screenshot to confirm the repair."
+                )
+            start_agent(context, prompt_override=verify_prompt)
+            self.report({'INFO'}, 'AI Visual Verification & Repair task launched')
+        except Exception as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
 class AF_OT_SendToAgent(bpy.types.Operator):
     bl_idname = 'archforge.send_to_agent'
     bl_label = 'Send to AI Agent'
@@ -800,14 +1007,8 @@ class AF_OT_AttachReferenceImage(bpy.types.Operator):
         if not p.is_file():
             self.report({'WARNING'}, f'File not found: {p}')
             return {'CANCELLED'}
-        context.scene.archforge_reference_image = str(p.resolve())
-        from . import viewport_hud
-        viewport_hud.HUD_STATE['flash_msg'] = f"✔ Attached: {p.name[:20]}"
-        viewport_hud.HUD_STATE['flash_time'] = time.monotonic()
-        for area in (context.screen.areas if context.screen else []):
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
-        self.report({'INFO'}, f'Reference image attached: {p.name}')
+        added, all_paths = add_reference_images(context, [p])
+        self.report({'INFO'}, f'Attached {added} image(s); {len(all_paths)} total')
         return {'FINISHED'}
 
 
@@ -816,6 +1017,8 @@ class AF_OT_BrowseReferenceImage(bpy.types.Operator):
     bl_label = 'Browse Reference Image'
     bl_description = 'Select a design or reference image to guide scene generation'
 
+    directory: StringProperty(subtype='DIR_PATH')
+    files: CollectionProperty(type=bpy.types.OperatorFileListElement)
     filepath: StringProperty(subtype='FILE_PATH')
     filter_glob: StringProperty(default='*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.exr;*.hdr', options={'HIDDEN'})
 
@@ -824,9 +1027,13 @@ class AF_OT_BrowseReferenceImage(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        if not self.filepath:
+        selected = ([Path(self.directory) / item.name for item in self.files]
+                    if self.files else ([Path(self.filepath)] if self.filepath else []))
+        if not selected:
             return {'CANCELLED'}
-        return bpy.ops.archforge.attach_reference_image(filepath=self.filepath)
+        added, all_paths = add_reference_images(context, selected)
+        self.report({'INFO'}, f'Attached {added} image(s); {len(all_paths)} total')
+        return {'FINISHED'}
 
 
 class AF_OT_ClearReferenceImage(bpy.types.Operator):
@@ -835,9 +1042,9 @@ class AF_OT_ClearReferenceImage(bpy.types.Operator):
     bl_description = 'Remove the attached reference image'
 
     def execute(self, context):
-        context.scene.archforge_reference_image = ''
+        set_reference_images(context.scene, [])
         from . import viewport_hud
-        viewport_hud.HUD_STATE['flash_msg'] = 'Reference image removed'
+        viewport_hud.HUD_STATE['flash_msg'] = 'All reference images removed'
         viewport_hud.HUD_STATE['flash_time'] = time.monotonic()
         for area in (context.screen.areas if context.screen else []):
             if area.type == 'VIEW_3D':
@@ -845,12 +1052,32 @@ class AF_OT_ClearReferenceImage(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class AF_OT_RemoveReferenceImage(bpy.types.Operator):
+    bl_idname = 'archforge.remove_reference_image'
+    bl_label = 'Remove Reference Image'
+    bl_description = 'Remove one attached reference image'
+
+    index: IntProperty(default=-1)
+
+    def execute(self, context):
+        paths = reference_images(context.scene)
+        if 0 <= self.index < len(paths):
+            paths.pop(self.index)
+            set_reference_images(context.scene, paths)
+        redraw()
+        return {'FINISHED'}
+
+
 if hasattr(bpy.types, 'FileHandler'):
     class AF_FH_ImageDrop(bpy.types.FileHandler):
         bl_idname = 'AF_FH_ImageDrop'
-        bl_label = 'ArchForge AI Reference Image'
+        bl_label = 'ArchForge AI Reference Images'
         bl_import_operator = 'archforge.attach_reference_image'
         bl_file_extensions = '.png;.jpg;.jpeg;.webp;.bmp'
+
+        @classmethod
+        def poll_drop(cls, context):
+            return bool(context.area and context.area.type == 'VIEW_3D')
 else:
     AF_FH_ImageDrop = None
 
@@ -1102,17 +1329,21 @@ class AF_PT_Main(bpy.types.Panel):
             layout.separator(factor=0.3)
 
             # Reference Image Card
-            ref_img = getattr(scene, 'archforge_reference_image', '').strip()
+            ref_images = reference_images(scene)
             img_box = layout.box()
             i_head = img_box.row(align=True)
-            i_head.label(text='Reference Image', icon='IMAGE_DATA')
-            if ref_img and Path(ref_img).is_file():
+            i_head.label(text=f'Reference Images ({len(ref_images)})', icon='IMAGE_DATA')
+            if ref_images:
                 i_head.operator('archforge.clear_reference_image', text='', icon='X', emboss=False)
-                i_row = img_box.row(align=True)
-                i_row.label(text=Path(ref_img).name, icon='CHECKMARK')
-                i_row.operator('archforge.browse_reference_image', text='Change…')
+                for index, image_path in enumerate(ref_images):
+                    i_row = img_box.row(align=True)
+                    i_row.label(text=Path(image_path).name[:48], icon='CHECKMARK')
+                    remove = i_row.operator('archforge.remove_reference_image', text='', icon='X', emboss=False)
+                    remove.index = index
+                img_box.operator('archforge.browse_reference_image', text='Add Images…', icon='ADD')
             else:
-                img_box.operator('archforge.browse_reference_image', text='Drag & Drop or Browse Image…', icon='FILE_FOLDER')
+                img_box.operator('archforge.browse_reference_image', text='Add Images…', icon='FILE_FOLDER')
+            img_box.label(text='Drop one or more images onto the 3D Viewport, or use Add Images.', icon='INFO')
 
             layout.separator(factor=0.3)
 
@@ -1133,9 +1364,13 @@ class AF_PT_Main(bpy.types.Panel):
             layout.separator(factor=0.4)
 
             # Primary Call-To-Action Button
-            cta_row = layout.row()
+            ver_row = layout.row(align=True)
+            ver_row.prop(scene, 'archforge_auto_verify', text='Auto-Verify & Fix (vision loop)', icon='VIEWZOOM')
+
+            cta_row = layout.row(align=True)
             cta_row.scale_y = 1.55
             cta_row.operator('archforge.send_to_agent', text=f'✨ Generate with {agent_name}', icon='PLAY')
+            cta_row.operator('archforge.verify_and_fix', text='👁 Verify & Fix', icon='IMAGE_DATA')
 
             sub_row = layout.row(align=True)
             if hasattr(bpy.ops.wm, 'console_toggle'):
@@ -1245,6 +1480,7 @@ CLASSES = (
     AF_OT_Connect,
     AF_OT_Disconnect,
     AF_OT_Checkpoint,
+    AF_OT_VerifyAndFix,
     AF_OT_SendToAgent,
     AF_OT_SendToCodex,
     AF_OT_CancelAgent,
@@ -1260,6 +1496,7 @@ CLASSES = (
     AF_OT_AttachReferenceImage,
     AF_OT_BrowseReferenceImage,
     AF_OT_ClearReferenceImage,
+    AF_OT_RemoveReferenceImage,
     *( [AF_FH_ImageDrop] if AF_FH_ImageDrop else [] ),
     viewport_hud.AF_OT_ViewportHUDModal,
     AF_PT_Main,
@@ -1271,6 +1508,11 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.archforge_runtime_dir = StringProperty(name='Runtime', subtype='DIR_PATH', default=default_root())
     bpy.types.Scene.archforge_codex_prompt = StringProperty(name='Prompt', default='')
+    bpy.types.Scene.archforge_auto_verify = BoolProperty(
+        name='Auto-verify & fix',
+        description='After editing, automatically take a viewport render, verify against prompt, and execute fixes',
+        default=True,
+    )
     bpy.types.Scene.archforge_include_selection = BoolProperty(name='Include selected objects', default=True)
     bpy.types.Scene.archforge_only_selected = BoolProperty(
         name='Only selected objects',
@@ -1336,6 +1578,11 @@ def register():
         subtype='FILE_PATH',
         default='',
     )
+    bpy.types.Scene.archforge_reference_images = StringProperty(
+        name='Reference Images',
+        description='JSON list of image paths attached to the next AI prompt',
+        default='[]',
+    )
 
     bpy.types.Scene.archforge_show_viewport_hud = BoolProperty(
         name='Floating Viewport HUD',
@@ -1388,6 +1635,7 @@ def unregister():
         'archforge_codex_prompt',
         'archforge_include_selection',
         'archforge_only_selected',
+        'archforge_auto_verify',
         'archforge_show_viewport_hud',
         'archforge_hud_width',
         'archforge_hud_scale',
@@ -1402,6 +1650,7 @@ def unregister():
         'archforge_codex_model_custom',
         'archforge_codex_path',
         'archforge_reference_image',
+        'archforge_reference_images',
     ]
     for prop in props_to_del:
         if hasattr(bpy.types.Scene, prop):

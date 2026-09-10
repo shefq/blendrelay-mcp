@@ -79,7 +79,9 @@ def handle(message,client):
         try:
             result=client.call(definition['_method'],args)
             if name=='archforge_blender_job' and isinstance(result.get('result'),dict) and result['result'].get('image'):
-                return {'content':[{'type':'image','data':result['result']['image'],'mimeType':result['result']['mime_type']}],'isError':False}
+                content=[{'type':'image','data':result['result']['image'],'mimeType':result['result']['mime_type']}]
+                if result['result'].get('path'):content.append({'type':'text','text':f"Viewport render saved to: {result['result']['path']}"})
+                return {'content':content,'isError':False}
             if name=='archforge_read_artifact':
                 chunks=[base64.b64decode(result['data'])];mime=result['mime_type']
                 while not result['eof']:

@@ -459,8 +459,12 @@ def draw_viewport_hud():
     bounds['btn_action'] = (btn_x, mid_y, btn_w, mid_h)
     btn_hover = (hover == 'btn_action')
 
-    # Main Action Button
+    # Action Buttons: Run Agent & Verify/Fix (or Stop Task when running)
+    prompt_x = hud_x + 14.0 * scale
     if is_running:
+        btn_w = 140.0 * scale
+        btn_x = hud_x + hud_w - btn_w - 14.0 * scale
+        bounds['btn_action'] = (btn_x, mid_y, btn_w, mid_h)
         pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 6.0)
         c_fill = (0.88 + 0.12 * pulse, 0.22, 0.24, 1.0)
         _draw_rounded_box(
@@ -470,20 +474,43 @@ def draw_viewport_hud():
             border_width=max(1.0, 1.2 * scale),
         )
         _draw_text_centered("✖ STOP TASK", btn_x, mid_y, btn_w, mid_h, size=12 * scale, color=(1.0, 1.0, 1.0, 1.0))
+        prompt_w = btn_x - prompt_x - 10.0 * scale
     else:
-        c_fill = (0.05, 0.62, 0.98, 1.0) if btn_hover else (0.02, 0.50, 0.90, 1.0)
-        c_border = (0.45, 0.88, 1.0, 0.95) if btn_hover else (0.15, 0.65, 0.98, 0.8)
+        btn_run_w = 114.0 * scale
+        btn_fix_w = 104.0 * scale
+        btn_gap = 6.0 * scale
+        btn_run_x = hud_x + hud_w - btn_run_w - 14.0 * scale
+        btn_fix_x = btn_run_x - btn_fix_w - btn_gap
+        bounds['btn_action'] = (btn_run_x, mid_y, btn_run_w, mid_h)
+        bounds['btn_fix'] = (btn_fix_x, mid_y, btn_fix_w, mid_h)
+
+        # Draw Verify & Fix Button
+        f_hover = (hover == 'btn_fix')
+        f_fill = (0.24, 0.14, 0.38, 0.95) if f_hover else (0.13, 0.09, 0.22, 0.90)
+        f_border = (0.85, 0.45, 1.0, 0.95) if f_hover else (0.55, 0.28, 0.85, 0.75)
         _draw_rounded_box(
-            btn_x, mid_y, btn_w, mid_h, 10.0 * scale,
+            btn_fix_x, mid_y, btn_fix_w, mid_h, 10.0 * scale,
+            fill_color=f_fill,
+            border_color=f_border,
+            border_width=max(1.0, 1.3 * scale),
+        )
+        _draw_text_centered("👁 VERIFY & FIX", btn_fix_x, mid_y, btn_fix_w, mid_h, size=10.5 * scale, color=(0.94, 0.86, 1.0, 1.0))
+
+        # Draw Run Agent Button
+        run_hover = (hover == 'btn_action')
+        c_fill = (0.05, 0.62, 0.98, 1.0) if run_hover else (0.02, 0.50, 0.90, 1.0)
+        c_border = (0.45, 0.88, 1.0, 0.95) if run_hover else (0.15, 0.65, 0.98, 0.8)
+        _draw_rounded_box(
+            btn_run_x, mid_y, btn_run_w, mid_h, 10.0 * scale,
             fill_color=c_fill,
             border_color=c_border,
             border_width=max(1.0, 1.5 * scale),
         )
-        _draw_text_centered("✦ RUN AGENT", btn_x, mid_y, btn_w, mid_h, size=12 * scale, color=(1.0, 1.0, 1.0, 1.0))
+        _draw_text_centered("✦ RUN AGENT", btn_run_x, mid_y, btn_run_w, mid_h, size=11.5 * scale, color=(1.0, 1.0, 1.0, 1.0))
+
+        prompt_w = btn_fix_x - prompt_x - 10.0 * scale
 
     # Prompt Text Input Box
-    prompt_x = hud_x + 14.0 * scale
-    prompt_w = btn_x - prompt_x - 10.0 * scale
     bounds['prompt'] = (prompt_x, mid_y, prompt_w, mid_h)
     is_typing = HUD_STATE['typing']
 
@@ -513,10 +540,12 @@ def draw_viewport_hud():
         max_text_w = prompt_w - 18.0 * scale
 
     # Reference image pill inside prompt box if attached
-    ref_image = getattr(scene, 'archforge_reference_image', '').strip()
-    has_ref = bool(ref_image and Path(ref_image).is_file())
+    from . import bridge_ui
+    ref_images = bridge_ui.reference_images(scene)
+    ref_image = ref_images[0] if ref_images else ''
+    has_ref = bool(ref_image)
     if has_ref:
-        img_pill_name = Path(ref_image).name
+        img_pill_name = Path(ref_image).name + (f' +{len(ref_images) - 1}' if len(ref_images) > 1 else '')
         pill_w = min(110.0 * scale, (len(img_pill_name[:10]) * 7.0 + 36.0) * scale)
         pill_x = prompt_x + 8.0 * scale
         pill_y = mid_y + (mid_h - 22.0 * scale) / 2.0
@@ -577,6 +606,31 @@ def draw_viewport_hud():
     )
     _draw_text_centered(f'❖ {model_label} ⌵', cur_x, bot_y, c2_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
     cur_x += c2_w + 6.0 * scale
+
+    # Chip: Auto-Verify [👁 Verify: ON / OFF]
+    auto_verify = getattr(scene, 'archforge_auto_verify', True)
+    cv_w = 104.0 * scale
+    if cur_x + cv_w < hud_x + hud_w - 24.0 * scale:
+        bounds['chip_verify'] = (cur_x, bot_y, cv_w, chip_h)
+        cv_hover = (hover == 'chip_verify')
+        if auto_verify:
+            cv_fill = (0.04, 0.22, 0.26, 0.95) if cv_hover else (0.03, 0.16, 0.20, 0.85)
+            cv_border = (0.0, 0.95, 1.0, 0.95) if cv_hover else (0.0, 0.75, 0.90, 0.8)
+            cv_color = (0.2, 0.95, 1.0, 1.0)
+            cv_text = '👁 Verify: ON'
+        else:
+            cv_fill = (0.16, 0.18, 0.24, 0.95) if cv_hover else (0.09, 0.12, 0.18, 0.85)
+            cv_border = (0.38, 0.45, 0.55, 0.8) if cv_hover else (0.25, 0.30, 0.40, 0.6)
+            cv_color = (0.60, 0.66, 0.76, 1.0)
+            cv_text = '👁 Verify: OFF'
+        _draw_rounded_box(
+            cur_x, bot_y, cv_w, chip_h, 12.0 * scale,
+            fill_color=cv_fill,
+            border_color=cv_border,
+            border_width=max(0.8, 1.0 * scale),
+        )
+        _draw_text_centered(cv_text, cur_x, bot_y, cv_w, chip_h, size=11 * scale, color=cv_color)
+        cur_x += cv_w + 6.0 * scale
 
     # Chip 3: Reference Image Dropzone [🖼 Drop Image] or [🖼 villa.jpg ✕]
     if has_ref:
@@ -749,9 +803,8 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 if is_inside(total_bounds):
                     fp = bpy.path.abspath(act.data.filepath)
                     if Path(fp).is_file():
-                        context.scene.archforge_reference_image = str(Path(fp).resolve())
-                        HUD_STATE['flash_msg'] = f"✔ Attached: {Path(fp).name[:18]}"
-                        HUD_STATE['flash_time'] = time.monotonic()
+                        from . import bridge_ui
+                        bridge_ui.add_reference_images(context, [Path(fp)])
                         try:
                             bpy.data.objects.remove(act, do_unlink=True)
                         except Exception:
@@ -812,9 +865,9 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
             # Prioritize interactive buttons and resize handles
             check_keys = (
                 'resize_corner', 'resize_left', 'resize_right',
-                'btn_action', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
+                'btn_action', 'btn_fix', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
                 'scale_up', 'scale_down', 'scale_reset',
-                'chip_backend', 'chip_model', 'chip_image_clear', 'chip_image', 'chip_scope', 'chip_checkpoint',
+                'chip_backend', 'chip_model', 'chip_verify', 'chip_image_clear', 'chip_image', 'chip_scope', 'chip_checkpoint',
                 'chip_sketch', 'chip_preset',
                 'tab_GENERATE', 'tab_SKETCH', 'tab_HISTORY', 'tab_SETTINGS',
                 'header_drag',
@@ -874,9 +927,8 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 try:
                     p = Path(raw_clip)
                     if p.is_file() and p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'):
-                        context.scene.archforge_reference_image = str(p.resolve())
-                        HUD_STATE['flash_msg'] = f"✔ Attached: {p.name[:18]}"
-                        HUD_STATE['flash_time'] = time.monotonic()
+                        from . import bridge_ui
+                        bridge_ui.add_reference_images(context, [p])
                         target_area.tag_redraw()
                         return {'RUNNING_MODAL'}
                 except Exception:
@@ -953,6 +1005,13 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
+                # 3b. Verify & Fix Button
+                if is_inside(bounds.get('btn_fix')):
+                    HUD_STATE['typing'] = False
+                    bpy.ops.archforge.verify_and_fix()
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
                 # 4. Prompt Input Area (Focus typing)
                 if is_inside(bounds.get('prompt')):
                     if is_inside(bounds.get('prompt_clear')):
@@ -979,8 +1038,9 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
 
                 # Reference Image Chip Clear
                 if is_inside(bounds.get('chip_image_clear')):
-                    context.scene.archforge_reference_image = ''
-                    HUD_STATE['flash_msg'] = 'Reference image removed'
+                    from . import bridge_ui
+                    bridge_ui.set_reference_images(context.scene, [])
+                    HUD_STATE['flash_msg'] = 'All reference images removed'
                     HUD_STATE['flash_time'] = time.monotonic()
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
@@ -988,6 +1048,15 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 # Reference Image Chip (Click to browse / change)
                 if is_inside(bounds.get('chip_image')):
                     bpy.ops.archforge.browse_reference_image('INVOKE_DEFAULT')
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # Chip Auto-Verify Toggle
+                if is_inside(bounds.get('chip_verify')):
+                    scene.archforge_auto_verify = not getattr(scene, 'archforge_auto_verify', True)
+                    status_txt = "ON" if scene.archforge_auto_verify else "OFF"
+                    HUD_STATE['flash_msg'] = f"Auto-Verify: {status_txt}"
+                    HUD_STATE['flash_time'] = time.monotonic()
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
@@ -1071,7 +1140,9 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                return {'RUNNING_MODAL'}
+                # Empty HUD space is visually transparent to scene interaction.
+                # Let Blender use the click for normal object selection.
+                return {'PASS_THROUGH'}
 
         return {'PASS_THROUGH'}
 
