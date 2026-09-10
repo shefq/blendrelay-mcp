@@ -20,8 +20,8 @@ def tool(name,method,description,properties=None,required=(),read=False,preappro
 
 tool('archforge_blender_sessions','blender.sessions','List live general-purpose Blender connections; no architecture project is required.',read=True)
 tool('archforge_blender_command','blender.submit','Operate on the open Blender scene. Actions: inspect (offset, limit, object_name, names=[...]), execute (code, label, save_checkpoint=False), execute_code (code - fastest), get_scene_info (compact 20-object summary), get_object_info (name - AABB+mesh detail for one object), versions, checkpoint (label), restore (version_id), screenshot. inspect with names=[list_of_names] does targeted Unicode-safe lookup with AABB detail. execute runs Python scene edits without continuous checkpoint overhead; checkpoints are saved after the AI generation process completes. NEVER call restore on execution errors. Returns a job; poll archforge_blender_job until complete/failed.',
-     {'operation_id':STR,'action':{'enum':['inspect','execute','execute_code','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot']},'arguments':{'type':'object'},'instance_id':STR},('operation_id','action'),preapproved=True)
-tool('archforge_blender_job','blender.job','Read the result of a general Blender operation; interrupted jobs must not be blindly retried with a new ID.',{'operation_id':STR},('operation_id',),True)
+     {'operation_id':STR,'action':{'enum':['inspect','execute','execute_code','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot']},'arguments':{'type':'object'},'instance_id':STR},('action',),preapproved=True)
+tool('archforge_blender_job','blender.job','Read the result of a general Blender operation; interrupted jobs must not be blindly retried with a new ID.',{'operation_id':STR,'instance_id':STR},('operation_id',),True)
 
 tool('archforge_get_capabilities','capabilities','Supported ArchForge operations, asset families, and release limits.',read=True)
 tool('archforge_list_projects','project.list','List persistent local projects.',read=True)

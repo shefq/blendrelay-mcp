@@ -23,7 +23,7 @@ class Bridge:
         tmp.write_text(json.dumps(job), encoding='utf-8')
         tmp.replace(path)
 
-    def rpc_blender_job(self, operation_id):
+    def rpc_blender_job(self, operation_id, instance_id=None, **kwargs):
         if not isinstance(operation_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', operation_id):
             raise DomainError('INVALID_ID', 'Use an opaque alphanumeric operation ID')
         path = self.bridge_dir / (operation_id + '.json')
@@ -48,11 +48,16 @@ class Bridge:
                 return {'command':job}
         return {'command':None}
 
-    def rpc_blender_submit(self, operation_id, action, arguments=None, instance_id=None):
+    def rpc_blender_submit(self, operation_id=None, action=None, arguments=None, instance_id=None):
+        if action not in ('inspect','execute','execute_code','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot'):
+            raise DomainError('UNKNOWN_ACTION',action)
+        # Auto-generate a unique operation_id if not supplied
+        if not operation_id:
+            operation_id = 'auto-' + hashlib.sha256(
+                json.dumps({'action': action, 'arguments': arguments or {}, 't': time.time()}, sort_keys=True).encode()
+            ).hexdigest()[:16]
         if not isinstance(operation_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',operation_id):
             raise DomainError('INVALID_ID','Use an opaque alphanumeric operation ID')
-        if action not in ('inspect','execute','versions','checkpoint','restore','screenshot'):
-            raise DomainError('UNKNOWN_ACTION',action)
         if arguments is not None and not isinstance(arguments,dict):
             raise DomainError('INVALID_ARGUMENTS','Expected an object')
         payload=dict(action=action,arguments=arguments or {},instance_id=instance_id)

@@ -387,7 +387,7 @@ def draw_sketch_on_image(path, strokes):
             line(first, last)
     image.pixels.foreach_set(pixels)
     image.filepath_raw = str(path)
-    image.file_format = 'PNG'
+    image.file_format = 'JPEG' if str(path).lower().endswith(('.jpg', '.jpeg')) else 'PNG'
     image.save()
     bpy.data.images.remove(image)
 
@@ -433,9 +433,43 @@ def screenshot(root, context=None):
             bpy.ops.render.opengl(write_still=True, view_context=True)
         draw_sketch_on_image(path, sketch.strokes(scene))
         data = path.read_bytes()
-        if len(data) > 650000:
-            raise RuntimeError('Viewport image exceeds transport size; lower viewport detail')
-        return dict(image=base64.b64encode(data).decode(), mime_type='image/png',
+        mime_type = 'image/png'
+
+        # Auto-optimize for AI transport if uncompressed PNG exceeds transport budget
+        max_safe_bytes = 450000
+        if len(data) > max_safe_bytes:
+            jpg_path = path.with_suffix('.jpg')
+            img = bpy.data.images.load(str(path), check_existing=False)
+            try:
+                w, h = img.size
+                if max(w, h) > 720:
+                    scale_factor = 720.0 / max(w, h)
+                    img.scale(max(1, round(w * scale_factor)), max(1, round(h * scale_factor)))
+                img.file_format = 'JPEG'
+                img.filepath_raw = str(jpg_path)
+                r.image_settings.quality = 85
+                img.save()
+            finally:
+                bpy.data.images.remove(img)
+
+            if jpg_path.is_file():
+                jpg_data = jpg_path.read_bytes()
+                if len(jpg_data) > max_safe_bytes:
+                    img2 = bpy.data.images.load(str(jpg_path), check_existing=False)
+                    try:
+                        w2, h2 = img2.size
+                        img2.scale(max(1, round(w2 * 0.75)), max(1, round(h2 * 0.75)))
+                        r.image_settings.quality = 70
+                        img2.save()
+                    finally:
+                        bpy.data.images.remove(img2)
+                    jpg_data = jpg_path.read_bytes()
+
+                data = jpg_data
+                path = jpg_path
+                mime_type = 'image/jpeg'
+
+        return dict(image=base64.b64encode(data).decode(), mime_type=mime_type,
                     path=str(path), sketch_overlay=bool(sketch.strokes(scene)))
     finally:
         (r.filepath, r.resolution_x, r.resolution_y,

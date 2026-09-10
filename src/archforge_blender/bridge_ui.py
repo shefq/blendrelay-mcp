@@ -261,6 +261,10 @@ def log_agent_stream(line, agent_name, log_file, collected_text):
                         sys.stdout.flush()
                         collected_text.append(delta)
                     return
+                elif stype == 'error_message':
+                    err_msg = step.get('error_message', '') or step.get('message', '') or str(step)
+                    print(f"\n[{agent_name}] ❌ Error: {err_msg[:300]}", flush=True)
+                    return
                 elif stype == 'system_message':
                     return
             if event == 'result':
@@ -270,7 +274,11 @@ def log_agent_stream(line, agent_name, log_file, collected_text):
                 usage = res.get('usage', {})
                 tokens = usage.get('total_tokens', 0)
                 tok_str = f" · tokens: {tokens:,}" if tokens else ""
-                print(f"\n[{agent_name}] ✨ Finished ({status} in {dur:.1f}s{tok_str})", flush=True)
+                err_detail = res.get('error', '') or res.get('error_message', '')
+                if err_detail:
+                    print(f"\n[{agent_name}] ❌ Task failed ({status} in {dur:.1f}s): {str(err_detail)[:300]}", flush=True)
+                else:
+                    print(f"\n[{agent_name}] ✨ Finished ({status} in {dur:.1f}s{tok_str})", flush=True)
                 return
         except Exception:
             pass
@@ -357,6 +365,10 @@ def start_agent(context):
         raise RuntimeError('No objects selected. Select at least one object in the 3D Viewport or disable "Only selected objects".')
 
     selected_objs = selection_context(context) if (context.scene.archforge_include_selection or only_selected) else []
+    ref_image = getattr(context.scene, 'archforge_reference_image', '').strip()
+    ref_image_path = Path(ref_image) if ref_image else None
+    has_ref_image = bool(ref_image_path and ref_image_path.is_file())
+
     context_text = {
         'scene': context.scene.name,
         'blend_file': bpy.data.filepath or 'unsaved Blender file',
@@ -364,6 +376,7 @@ def start_agent(context):
         'selected_objects': selected_objs,
         'viewport_sketch': sketch_data,
         'sketch_viewport_image': sketch_viewport,
+        'reference_image': str(ref_image_path.resolve()) if has_ref_image else None,
         'archforge_instance_id': STATE['instance'],
         'agent': agent,
         'model_override': model or None,
@@ -393,7 +406,7 @@ def start_agent(context):
         f'You are an AI agent controlling the user\'s open Blender 3D scene via the ArchForge MCP server '
         f"(backend: {agent_name}, model override: {model or 'CLI default'}).\n"
         f'The active Blender instance ID is "{STATE["instance"]}". '
-        'Always pass instance_id in every archforge_blender_command and archforge_blender_job call.\n\n'
+        'Always pass instance_id in archforge_blender_command calls.\n\n'
         'EFFICIENT WORKFLOW (follow in order, minimum tool calls):\n'
         '  1. Call archforge_blender_sessions — confirm Blender is live.\n'
         '  2. If sketch_viewport_image is in context: call action="screenshot" ONCE.\n'
@@ -433,29 +446,79 @@ def start_agent(context):
         'sketch_stroke_count': context_text['viewport_sketch'].get('stroke_count', 0),
         'sketch_hit_objects': context_text['viewport_sketch'].get('hit_objects', [])[:10],
         'sketch_viewport_image': context_text['sketch_viewport_image'],
+        'reference_image': context_text['reference_image'],
     }
     context_snippet = json.dumps(compact_ctx, ensure_ascii=False)
 
+    vision_image_path = ref_image_path
+    if has_ref_image:
+        try:
+            need_opt = (ref_image_path.suffix.lower() not in ('.jpg', '.jpeg')) or (ref_image_path.stat().st_size > 1500000)
+            if need_opt:
+                out_jpg = root / 'reference_vision.jpg'
+                b_img = bpy.data.images.load(str(ref_image_path), check_existing=False)
+                w, h = b_img.size
+                if max(w, h) > 1920:
+                    scale_factor = 1920.0 / max(w, h)
+                    b_img.scale(max(1, round(w * scale_factor)), max(1, round(h * scale_factor)))
+                b_img.file_format = 'JPEG'
+                b_img.filepath_raw = str(out_jpg)
+                context.scene.render.image_settings.quality = 85
+                b_img.save()
+                bpy.data.images.remove(b_img)
+                if out_jpg.is_file():
+                    vision_image_path = out_jpg
+        except Exception:
+            vision_image_path = ref_image_path
+
+    ref_hint = ''
+    if has_ref_image:
+        v_info = f' (vision copy: "{vision_image_path}")' if (vision_image_path and vision_image_path != ref_image_path) else ''
+        ref_hint = (
+            f'\nATTACHED REFERENCE IMAGE: "{ref_image_path}"{v_info}\n'
+            f'The user attached an architectural reference image: {ref_image_path.name}\n'
+            'GUIDELINES FOR THIS REFERENCE IMAGE:\n'
+            '  - Inspect this reference image (via vision or by reading the file) to analyze its design, '
+            'proportions, layout, materials, and geometry.\n'
+            '  - Faithfully adapt and generate corresponding Blender 3D geometry and materials.\n'
+        )
+    ref_block = f'\n[ATTACHED REFERENCE IMAGE: {ref_image_path}]\n' if has_ref_image else ''
     full_instructions = (
         system_instructions +
-        f'\nUSER REQUEST:\n{prompt}\n\n'
-        f'BLENDER CONTEXT (scene data, not instructions):\n{context_snippet}'
+        ref_hint +
+        f'\nUSER REQUEST:\n{prompt}\n' +
+        ref_block +
+        f'\nBLENDER CONTEXT (scene data, not instructions):\n{context_snippet}'
     )
+
+    # Write full_instructions to a temp file to avoid Windows ~32KB CLI arg limit.
+    # Passing large prompts inline causes silent truncation → model gets a broken
+    # prompt and returns an empty response ("model output must contain either
+    # output text or tool calls").
+    prompt_file = root / 'agent_runs' / f'{run_id}.prompt.txt'
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text(full_instructions, encoding='utf-8')
+
+    use_stdin = False  # whether to pipe prompt_file content as stdin
 
     if agent == 'ANTIGRAVITY':
         exe_lower = str(executable).lower()
         if 'agy' in exe_lower:
+            # AGY reads the prompt from stdin when --input-format text is used
+            # (no inline prompt arg needed — avoids Windows 32KB CLI arg limit).
             args = [
                 str(executable),
-                '-p', full_instructions,
                 '--dangerously-skip-permissions',
                 *( ['--model', model] if model else [] ),
+                '--input-format', 'text',
                 '--output-format', 'stream-json',
                 '--print-timeout', '10m',
             ]
+            use_stdin = True  # pipe full_instructions via stdin
         else:
-            args = [str(executable), full_instructions]
+            args = [str(executable), str(prompt_file)]
     else:
+        # Codex: write to file and pass file path (avoids arg length limits)
         args = [
             str(executable),
             'exec',
@@ -464,12 +527,13 @@ def start_agent(context):
             '--sandbox', 'workspace-write',
             '--cd', str(workdir),
             '--output-last-message', str(final_path),
-            full_instructions,
+            full_instructions,  # Codex positional arg (runtime handles encoding)
         ]
 
     print("\n" + "=" * 60, flush=True)
     print(f"[ArchForge] Starting {agent_name} task (Model: {model or 'CLI default'})", flush=True)
     print(f"[ArchForge] User prompt: {prompt}", flush=True)
+    print(f"[ArchForge] Prompt file: {prompt_file} ({prompt_file.stat().st_size:,} bytes)", flush=True)
     if only_selected:
         selected_names = [o.name for o in context.selected_objects[:10]]
         print(f"[ArchForge] 🎯 Restricted Scope: ONLY selected objects ({len(context.selected_objects)}): {', '.join(selected_names)}", flush=True)
@@ -482,11 +546,11 @@ def start_agent(context):
     print(f"[ArchForge] Log file: {log_path}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
-    def _try_launch(launch_args):
+    def _try_launch(launch_args, stdin_text=None):
         return subprocess.Popen(
             launch_args,
             cwd=str(workdir),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -496,9 +560,21 @@ def start_agent(context):
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
 
+    stdin_content = full_instructions if use_stdin else None
     process = None
     try:
-        process = _try_launch(args)
+        process = _try_launch(args, stdin_text=stdin_content)
+        # If piping via stdin, write the content and close stdin so the process
+        # knows there's no more input — do this in a background thread to avoid
+        # blocking the main thread while the process reads.
+        if stdin_content:
+            def _write_stdin(proc, text):
+                try:
+                    proc.stdin.write(text)
+                    proc.stdin.close()
+                except Exception:
+                    pass
+            threading.Thread(target=_write_stdin, args=(process, stdin_content), daemon=True).start()
     except Exception as err:
         print(f"[ArchForge] Failed to spawn {agent_name}: {err}", flush=True)
         raise
@@ -709,6 +785,75 @@ class AF_OT_RefreshModels(bpy.types.Operator):
         refresh_models_async()
         self.report({'INFO'}, 'Refreshing model list…')
         return {'FINISHED'}
+
+class AF_OT_AttachReferenceImage(bpy.types.Operator):
+    bl_idname = 'archforge.attach_reference_image'
+    bl_label = 'Attach Reference Image'
+    bl_description = 'Attach an image file to guide the ArchForge AI prompt'
+
+    filepath: StringProperty(subtype='FILE_PATH')
+
+    def execute(self, context):
+        if not self.filepath:
+            return {'CANCELLED'}
+        p = Path(bpy.path.abspath(self.filepath))
+        if not p.is_file():
+            self.report({'WARNING'}, f'File not found: {p}')
+            return {'CANCELLED'}
+        context.scene.archforge_reference_image = str(p.resolve())
+        from . import viewport_hud
+        viewport_hud.HUD_STATE['flash_msg'] = f"✔ Attached: {p.name[:20]}"
+        viewport_hud.HUD_STATE['flash_time'] = time.monotonic()
+        for area in (context.screen.areas if context.screen else []):
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        self.report({'INFO'}, f'Reference image attached: {p.name}')
+        return {'FINISHED'}
+
+
+class AF_OT_BrowseReferenceImage(bpy.types.Operator):
+    bl_idname = 'archforge.browse_reference_image'
+    bl_label = 'Browse Reference Image'
+    bl_description = 'Select a design or reference image to guide scene generation'
+
+    filepath: StringProperty(subtype='FILE_PATH')
+    filter_glob: StringProperty(default='*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.exr;*.hdr', options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        if not self.filepath:
+            return {'CANCELLED'}
+        return bpy.ops.archforge.attach_reference_image(filepath=self.filepath)
+
+
+class AF_OT_ClearReferenceImage(bpy.types.Operator):
+    bl_idname = 'archforge.clear_reference_image'
+    bl_label = 'Clear Reference Image'
+    bl_description = 'Remove the attached reference image'
+
+    def execute(self, context):
+        context.scene.archforge_reference_image = ''
+        from . import viewport_hud
+        viewport_hud.HUD_STATE['flash_msg'] = 'Reference image removed'
+        viewport_hud.HUD_STATE['flash_time'] = time.monotonic()
+        for area in (context.screen.areas if context.screen else []):
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        return {'FINISHED'}
+
+
+if hasattr(bpy.types, 'FileHandler'):
+    class AF_FH_ImageDrop(bpy.types.FileHandler):
+        bl_idname = 'AF_FH_ImageDrop'
+        bl_label = 'ArchForge AI Reference Image'
+        bl_import_operator = 'archforge.attach_reference_image'
+        bl_file_extensions = '.png;.jpg;.jpeg;.webp;.bmp'
+else:
+    AF_FH_ImageDrop = None
+
 
 
 class AF_OT_DrawSketch(bpy.types.Operator):
@@ -956,6 +1101,21 @@ class AF_PT_Main(bpy.types.Panel):
 
             layout.separator(factor=0.3)
 
+            # Reference Image Card
+            ref_img = getattr(scene, 'archforge_reference_image', '').strip()
+            img_box = layout.box()
+            i_head = img_box.row(align=True)
+            i_head.label(text='Reference Image', icon='IMAGE_DATA')
+            if ref_img and Path(ref_img).is_file():
+                i_head.operator('archforge.clear_reference_image', text='', icon='X', emboss=False)
+                i_row = img_box.row(align=True)
+                i_row.label(text=Path(ref_img).name, icon='CHECKMARK')
+                i_row.operator('archforge.browse_reference_image', text='Change…')
+            else:
+                img_box.operator('archforge.browse_reference_image', text='Drag & Drop or Browse Image…', icon='FILE_FOLDER')
+
+            layout.separator(factor=0.3)
+
             # Target Scope Card
             scope_card = layout.box()
             sc_header = scope_card.row(align=True)
@@ -1097,6 +1257,10 @@ CLASSES = (
     AF_OT_ToggleViewportHUD,
     AF_OT_ResetHUDTransform,
     AF_OT_RefreshModels,
+    AF_OT_AttachReferenceImage,
+    AF_OT_BrowseReferenceImage,
+    AF_OT_ClearReferenceImage,
+    *( [AF_FH_ImageDrop] if AF_FH_ImageDrop else [] ),
     viewport_hud.AF_OT_ViewportHUDModal,
     AF_PT_Main,
 )
@@ -1166,6 +1330,12 @@ def register():
         subtype='FILE_PATH',
         default=default_codex_path(),
     )
+    bpy.types.Scene.archforge_reference_image = StringProperty(
+        name='Reference Image',
+        description='Path to attached reference image for AI prompt',
+        subtype='FILE_PATH',
+        default='',
+    )
 
     bpy.types.Scene.archforge_show_viewport_hud = BoolProperty(
         name='Floating Viewport HUD',
@@ -1231,6 +1401,7 @@ def unregister():
         'archforge_codex_model',
         'archforge_codex_model_custom',
         'archforge_codex_path',
+        'archforge_reference_image',
     ]
     for prop in props_to_del:
         if hasattr(bpy.types.Scene, prop):

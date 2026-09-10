@@ -512,19 +512,40 @@ def draw_viewport_hud():
     else:
         max_text_w = prompt_w - 18.0 * scale
 
+    # Reference image pill inside prompt box if attached
+    ref_image = getattr(scene, 'archforge_reference_image', '').strip()
+    has_ref = bool(ref_image and Path(ref_image).is_file())
+    if has_ref:
+        img_pill_name = Path(ref_image).name
+        pill_w = min(110.0 * scale, (len(img_pill_name[:10]) * 7.0 + 36.0) * scale)
+        pill_x = prompt_x + 8.0 * scale
+        pill_y = mid_y + (mid_h - 22.0 * scale) / 2.0
+        _draw_rounded_box(
+            pill_x, pill_y, pill_w, 22.0 * scale, 10.0 * scale,
+            fill_color=(0.06, 0.24, 0.18, 0.95),
+            border_color=(0.15, 0.85, 0.50, 0.8),
+            border_width=max(0.8, 1.0 * scale),
+        )
+        _draw_text(f"🖼 {img_pill_name[:10]}", pill_x + 6.0 * scale, pill_y + 5.0 * scale, size=10 * scale, color=(0.4, 1.0, 0.7, 1.0))
+        text_start_x = pill_x + pill_w + 6.0 * scale
+        avail_text_w = max_text_w - pill_w - 6.0 * scale
+    else:
+        text_start_x = prompt_x + 12.0 * scale
+        avail_text_w = max_text_w
+
     # Draw Prompt Content or Placeholder
     text_y = mid_y + 13.0 * scale
     if not prompt_text and not is_typing:
-        _draw_text("Prompt AI agent to create or modify scene / selected objects...", prompt_x + 12.0 * scale, text_y, size=13 * scale, color=(0.42, 0.48, 0.58, 1.0))
+        _draw_text("Prompt AI agent to create or modify scene / selected objects...", text_start_x, text_y, size=13 * scale, color=(0.42, 0.48, 0.58, 1.0))
     else:
-        disp_text = _truncate_left(prompt_text, max_text_w, size=13 * scale)
-        _draw_text(disp_text, prompt_x + 12.0 * scale, text_y, size=13 * scale, color=(0.95, 0.97, 1.0, 1.0))
+        disp_text = _truncate_left(prompt_text, avail_text_w, size=13 * scale)
+        _draw_text(disp_text, text_start_x, text_y, size=13 * scale, color=(0.95, 0.97, 1.0, 1.0))
 
         if is_typing and (int(time.monotonic() * 2.5) % 2 == 0):
             font_id = 0
             blf.size(font_id, max(9, int(13 * scale)))
             tw, _ = blf.dimensions(font_id, disp_text)
-            _draw_text('|', prompt_x + 12.0 * scale + tw + 2.0 * scale, text_y, size=13 * scale, color=(0.0, 0.85, 1.0, 1.0))
+            _draw_text('|', text_start_x + tw + 2.0 * scale, text_y, size=13 * scale, color=(0.0, 0.85, 1.0, 1.0))
 
     # ── 4. Bottom Bar: Control Chips ─────────────────────────────────────────
     bot_y = hud_y + 11.0 * scale
@@ -556,6 +577,40 @@ def draw_viewport_hud():
     )
     _draw_text_centered(f'❖ {model_label} ⌵', cur_x, bot_y, c2_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
     cur_x += c2_w + 6.0 * scale
+
+    # Chip 3: Reference Image Dropzone [🖼 Drop Image] or [🖼 villa.jpg ✕]
+    if has_ref:
+        img_name = Path(ref_image).name
+        short_name = img_name if len(img_name) <= 12 else (img_name[:9] + '…')
+        c_img_w = max(112.0, (len(short_name) * 7.2 + 48.0)) * scale
+        bounds['chip_image'] = (cur_x, bot_y, c_img_w, chip_h)
+        clr_w = 18.0 * scale
+        bounds['chip_image_clear'] = (cur_x + c_img_w - clr_w - 4.0 * scale, bot_y + (chip_h - clr_w) / 2.0, clr_w, clr_w)
+
+        img_hover = (hover == 'chip_image')
+        _draw_rounded_box(
+            cur_x, bot_y, c_img_w, chip_h, 12.0 * scale,
+            fill_color=(0.06, 0.22, 0.16, 0.95) if img_hover else (0.04, 0.16, 0.12, 0.85),
+            border_color=(0.2, 0.9, 0.55, 0.9) if img_hover else (0.12, 0.75, 0.45, 0.7),
+            border_width=max(0.8, 1.0 * scale),
+        )
+        _draw_text(f"🖼 {short_name}", cur_x + 8.0 * scale, bot_y + 7.0 * scale, size=11 * scale, color=(0.4, 1.0, 0.7, 1.0))
+        clr_hover = (hover == 'chip_image_clear')
+        _draw_text_centered("✕", cur_x + c_img_w - clr_w - 4.0 * scale, bot_y + (chip_h - clr_w) / 2.0, clr_w, clr_w, size=10 * scale, color=(1.0, 0.6, 0.6, 1.0) if clr_hover else (0.7, 0.9, 0.8, 1.0))
+        cur_x += c_img_w + 6.0 * scale
+    else:
+        c_img_w = 106.0 * scale
+        bounds['chip_image'] = (cur_x, bot_y, c_img_w, chip_h)
+        img_hover = (hover == 'chip_image')
+        _draw_rounded_box(
+            cur_x, bot_y, c_img_w, chip_h, 12.0 * scale,
+            fill_color=(0.14, 0.20, 0.28, 0.95) if img_hover else (0.09, 0.12, 0.18, 0.85),
+            border_color=(0.0, 0.82, 1.0, 0.8) if img_hover else (0.28, 0.38, 0.55, 0.8),
+            border_width=max(0.8, 1.0 * scale),
+        )
+        img_label = "🖼 Drop Image" if img_hover else "🖼 + Image"
+        _draw_text_centered(img_label, cur_x, bot_y, c_img_w, chip_h, size=11 * scale, color=(0.15, 0.88, 1.0, 1.0) if img_hover else (0.80, 0.86, 0.94, 1.0))
+        cur_x += c_img_w + 6.0 * scale
 
     # Chip 3: Target Scope [🎯 Selected Only] vs [🌐 Full Scene]
     c3_w = 132.0 * scale
@@ -687,6 +742,22 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
             x0, y0, w0, h0 = rect
             return (x0 <= rx <= x0 + w0) and (y0 <= ry <= y0 + h0)
 
+        # ── Detect Dragged & Dropped Image onto HUD ──────────────────────────
+        act = context.active_object
+        if act and getattr(act, 'type', None) == 'EMPTY' and getattr(act, 'empty_display_type', None) == 'IMAGE':
+            if getattr(act, 'data', None) and getattr(act.data, 'filepath', None):
+                if is_inside(total_bounds):
+                    fp = bpy.path.abspath(act.data.filepath)
+                    if Path(fp).is_file():
+                        context.scene.archforge_reference_image = str(Path(fp).resolve())
+                        HUD_STATE['flash_msg'] = f"✔ Attached: {Path(fp).name[:18]}"
+                        HUD_STATE['flash_time'] = time.monotonic()
+                        try:
+                            bpy.data.objects.remove(act, do_unlink=True)
+                        except Exception:
+                            pass
+                        target_area.tag_redraw()
+
         # ── Handle Ongoing Drag (Resize or Move) ─────────────────────────────
         dragging = HUD_STATE.get('dragging')
         if dragging:
@@ -743,7 +814,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 'resize_corner', 'resize_left', 'resize_right',
                 'btn_action', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
                 'scale_up', 'scale_down', 'scale_reset',
-                'chip_backend', 'chip_model', 'chip_scope', 'chip_checkpoint',
+                'chip_backend', 'chip_model', 'chip_image_clear', 'chip_image', 'chip_scope', 'chip_checkpoint',
                 'chip_sketch', 'chip_preset',
                 'tab_GENERATE', 'tab_SKETCH', 'tab_HISTORY', 'tab_SETTINGS',
                 'header_drag',
@@ -780,11 +851,47 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
-            elif event.type == 'BACKSPACE' and event.value == 'PRESS':
+            elif event.type in ('BACK_SPACE', 'BACKSPACE') and event.value == 'PRESS':
+                cur = context.scene.archforge_codex_prompt
+                if cur:
+                    if event.ctrl:
+                        parts = cur.rstrip().rsplit(' ', 1)
+                        context.scene.archforge_codex_prompt = (parts[0] + ' ') if len(parts) > 1 else ''
+                    else:
+                        context.scene.archforge_codex_prompt = cur[:-1]
+                    target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            elif event.type == 'DEL' and event.value == 'PRESS':
                 cur = context.scene.archforge_codex_prompt
                 if cur:
                     context.scene.archforge_codex_prompt = cur[:-1]
                     target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            elif event.type == 'V' and event.ctrl and event.value == 'PRESS':
+                raw_clip = getattr(context.window_manager, 'clipboard', '').strip().strip('"\'')
+                try:
+                    p = Path(raw_clip)
+                    if p.is_file() and p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'):
+                        context.scene.archforge_reference_image = str(p.resolve())
+                        HUD_STATE['flash_msg'] = f"✔ Attached: {p.name[:18]}"
+                        HUD_STATE['flash_time'] = time.monotonic()
+                        target_area.tag_redraw()
+                        return {'RUNNING_MODAL'}
+                except Exception:
+                    pass
+                if raw_clip:
+                    clean_clip = raw_clip.replace('\r\n', ' ').replace('\n', ' ')
+                    context.scene.archforge_codex_prompt += clean_clip
+                    target_area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            elif event.type == 'C' and event.ctrl and event.value == 'PRESS':
+                context.window_manager.clipboard = context.scene.archforge_codex_prompt
+                HUD_STATE['flash_msg'] = 'Copied to clipboard'
+                HUD_STATE['flash_time'] = time.monotonic()
+                target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
             elif event.type == 'SPACE' and event.value == 'PRESS':
@@ -792,7 +899,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
-            elif event.ascii and event.value == 'PRESS':
+            elif event.ascii and event.value == 'PRESS' and ord(event.ascii) >= 32:
                 context.scene.archforge_codex_prompt += event.ascii
                 target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
@@ -867,6 +974,20 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 if is_inside(bounds.get('chip_backend')):
                     cur = context.scene.archforge_agent_backend
                     context.scene.archforge_agent_backend = 'CODEX' if cur == 'ANTIGRAVITY' else 'ANTIGRAVITY'
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # Reference Image Chip Clear
+                if is_inside(bounds.get('chip_image_clear')):
+                    context.scene.archforge_reference_image = ''
+                    HUD_STATE['flash_msg'] = 'Reference image removed'
+                    HUD_STATE['flash_time'] = time.monotonic()
+                    target_area.tag_redraw()
+                    return {'RUNNING_MODAL'}
+
+                # Reference Image Chip (Click to browse / change)
+                if is_inside(bounds.get('chip_image')):
+                    bpy.ops.archforge.browse_reference_image('INVOKE_DEFAULT')
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
