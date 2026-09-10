@@ -52,6 +52,107 @@ def default_codex_path():
     return r'C:\Users\mshef\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe'
 
 
+# ── Optional model overrides ───────────────────────────────────────────────
+
+
+MODEL_DEFAULT = '__DEFAULT__'
+MODEL_CUSTOM = '__CUSTOM__'
+_MODEL_ITEMS = {
+    'ANTIGRAVITY': [(MODEL_DEFAULT, 'CLI default', 'Use the model configured by Antigravity', 'AUTO', 0),
+                    (MODEL_CUSTOM, 'Custom…', 'Enter a model identifier', 'OPTIONS', 1)],
+    'CODEX': [(MODEL_DEFAULT, 'CLI default', 'Use the model configured by Codex', 'AUTO', 0),
+              (MODEL_CUSTOM, 'Custom…', 'Enter a model identifier', 'OPTIONS', 1)],
+}
+
+
+def _enum_items(agent, models):
+    items = [(MODEL_DEFAULT, 'CLI default', f'Use the model configured by {agent}', 'AUTO', 0)]
+    seen = {MODEL_DEFAULT, MODEL_CUSTOM}
+    for model_id, display_name, description in models:
+        if model_id and model_id not in seen:
+            seen.add(model_id)
+            items.append((model_id, display_name or model_id, description or model_id, 'NONE', len(items)))
+    items.append((MODEL_CUSTOM, 'Custom…', 'Enter a model identifier', 'OPTIONS', len(items)))
+    return items
+
+
+def discover_codex_models():
+    models = []
+    cache_path = Path.home() / '.codex' / 'models_cache.json'
+    if cache_path.is_file():
+        try:
+            data = json.loads(cache_path.read_text(encoding='utf-8', errors='replace'))
+            for entry in data.get('models', []):
+                if entry.get('visibility') == 'hide':
+                    continue
+                model_id = str(entry.get('slug', '')).strip()
+                if model_id:
+                    models.append((model_id, entry.get('display_name') or model_id,
+                                   entry.get('description') or f'Codex model: {model_id}'))
+        except Exception as error:
+            STATE['model_status'] = f'Could not read Codex model cache: {error}'
+    _MODEL_ITEMS['CODEX'] = _enum_items('Codex', models)
+    return len(models)
+
+
+def discover_antigravity_models():
+    models = []
+    executable = default_antigravity_path()
+    if executable and (Path(executable).is_file() or shutil.which(executable)):
+        try:
+            completed = subprocess.run(
+                [executable, 'models'], capture_output=True, text=True, timeout=10,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+            )
+            if completed.returncode == 0:
+                for line in completed.stdout.splitlines():
+                    line = line.strip()
+                    if not line or 'fetching' in line.lower():
+                        continue
+                    parts = [part.strip() for part in line.split('\t')]
+                    model_id = parts[0]
+                    if model_id and ' ' not in model_id:
+                        models.append((model_id, parts[1] if len(parts) > 1 else model_id,
+                                       f'Antigravity model: {model_id}'))
+            elif completed.stderr:
+                STATE['model_status'] = completed.stderr.strip().splitlines()[-1][:180]
+        except Exception as error:
+            STATE['model_status'] = f'Antigravity model discovery failed: {error}'
+    _MODEL_ITEMS['ANTIGRAVITY'] = _enum_items('Antigravity', models)
+    return len(models)
+
+
+def model_items_antigravity(self, context):
+    return _MODEL_ITEMS['ANTIGRAVITY']
+
+
+def model_items_codex(self, context):
+    return _MODEL_ITEMS['CODEX']
+
+
+def selected_model(scene, agent):
+    if agent == 'ANTIGRAVITY':
+        choice = getattr(scene, 'archforge_antigravity_model', MODEL_DEFAULT)
+        custom = getattr(scene, 'archforge_antigravity_model_custom', '').strip()
+    else:
+        choice = getattr(scene, 'archforge_codex_model', MODEL_DEFAULT)
+        custom = getattr(scene, 'archforge_codex_model_custom', '').strip()
+    if choice == MODEL_DEFAULT:
+        return ''
+    if choice == MODEL_CUSTOM:
+        return custom
+    return choice
+
+
+def refresh_models_async():
+    def worker():
+        codex_count = discover_codex_models()
+        antigravity_count = discover_antigravity_models()
+        STATE['model_status'] = f'{codex_count} Codex and {antigravity_count} Antigravity models found'
+        STATE['need_redraw'] = True
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def agent_paths(root, run_id):
     folder = Path(root) / 'agent_runs'
     folder.mkdir(parents=True, exist_ok=True)
@@ -232,23 +333,13 @@ def start_agent(context):
                 f'Antigravity CLI (agy.exe) not found at: {executable}. '
                 'Please install it via: irm https://antigravity.google/cli/install.ps1 | iex'
             )
-        model = getattr(context.scene, 'archforge_antigravity_model', 'gemini-3.8-flash-high')
-        if model == 'custom':
-            model = getattr(context.scene, 'archforge_antigravity_model_custom', '').strip() or 'gemini-3.8-flash-high'
-        elif model in ('gemini-3.8-flash', 'gemini-2.5-flash-thinking'):
-            model = 'gemini-3.8-flash-high'
-        elif model == 'gemini-2.5-pro':
-            model = 'gemini-3.1-pro-high'
-        elif model == 'gemini-2.5-flash':
-            model = 'gemini-3.7-flash-high'
+        model = selected_model(context.scene, agent)
     else:
         exe_str = getattr(context.scene, 'archforge_codex_path', '').strip() or default_codex_path()
         executable = Path(exe_str)
         if not executable.is_file() and not shutil.which(str(executable)):
             raise RuntimeError(f'Codex executable not found at: {executable}. Set its path in the ArchForge panel.')
-        model = getattr(context.scene, 'archforge_codex_model', 'gpt-5.5')
-        if model == 'custom':
-            model = getattr(context.scene, 'archforge_codex_model_custom', '').strip() or 'gpt-5.5'
+        model = selected_model(context.scene, agent)
 
     root = Path(STATE['root'] or context.scene.archforge_runtime_dir).resolve()
     sketch_data = sketch.payload(context.scene)
@@ -275,7 +366,7 @@ def start_agent(context):
         'sketch_viewport_image': sketch_viewport,
         'archforge_instance_id': STATE['instance'],
         'agent': agent,
-        'model': model,
+        'model_override': model or None,
     }
     workdir = Path(bpy.data.filepath).parent if bpy.data.filepath else Path(root)
 
@@ -300,7 +391,7 @@ def start_agent(context):
             )
     system_instructions = (
         f'You are an AI agent controlling the user\'s open Blender 3D scene via the ArchForge MCP server '
-        f'(backend: {agent_name}, model: {model}).\n'
+        f"(backend: {agent_name}, model override: {model or 'CLI default'}).\n"
         f'The active Blender instance ID is "{STATE["instance"]}". '
         'Always pass instance_id in every archforge_blender_command and archforge_blender_job call.\n\n'
         'EFFICIENT WORKFLOW (follow in order, minimum tool calls):\n'
@@ -358,7 +449,7 @@ def start_agent(context):
                 str(executable),
                 '-p', full_instructions,
                 '--dangerously-skip-permissions',
-                '--model', model,
+                *( ['--model', model] if model else [] ),
                 '--output-format', 'stream-json',
                 '--print-timeout', '10m',
             ]
@@ -368,7 +459,8 @@ def start_agent(context):
         args = [
             str(executable),
             'exec',
-            '--model', model,
+            *( ['--skip-git-repo-check'] if workdir == root or root in workdir.parents else [] ),
+            *( ['--model', model] if model else [] ),
             '--sandbox', 'workspace-write',
             '--cd', str(workdir),
             '--output-last-message', str(final_path),
@@ -376,7 +468,7 @@ def start_agent(context):
         ]
 
     print("\n" + "=" * 60, flush=True)
-    print(f"[ArchForge] Starting {agent_name} task (Model: {model})", flush=True)
+    print(f"[ArchForge] Starting {agent_name} task (Model: {model or 'CLI default'})", flush=True)
     print(f"[ArchForge] User prompt: {prompt}", flush=True)
     if only_selected:
         selected_names = [o.name for o in context.selected_objects[:10]]
@@ -510,6 +602,9 @@ def received(response):
 
 
 def timer():
+    if STATE.get('need_redraw'):
+        STATE['need_redraw'] = False
+        redraw()
     check_codex()
     viewport_hud.ensure_hud_modal()
     c=STATE['connection']
@@ -602,6 +697,17 @@ class AF_OT_CancelAgent(bpy.types.Operator):
             STATE['status'] = 'Task cancelled by user'
             print("\n[ArchForge] 🛑 Task cancelled by user.\n" + "=" * 60 + "\n", flush=True)
             redraw()
+        return {'FINISHED'}
+
+
+class AF_OT_RefreshModels(bpy.types.Operator):
+    bl_idname = 'archforge.refresh_models'
+    bl_label = 'Refresh available models'
+    bl_description = 'Reload models exposed by the selected CLI and the Codex local cache'
+
+    def execute(self, context):
+        refresh_models_async()
+        self.report({'INFO'}, 'Refreshing model list…')
         return {'FINISHED'}
 
 
@@ -794,9 +900,7 @@ class AF_PT_Main(bpy.types.Panel):
         if tab == 'GENERATE':
             agent = getattr(scene, 'archforge_agent_backend', 'ANTIGRAVITY')
             agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
-            model = scene.archforge_antigravity_model if agent == 'ANTIGRAVITY' else scene.archforge_codex_model
-            if model == 'custom':
-                model = getattr(scene, 'archforge_antigravity_model_custom' if agent == 'ANTIGRAVITY' else 'archforge_codex_model_custom', 'custom')
+            model = selected_model(scene, agent) or 'CLI default'
 
             # Active Task Running Banner
             active_proc = STATE.get('agent_process') or STATE.get('codex_process')
@@ -833,6 +937,22 @@ class AF_PT_Main(bpy.types.Panel):
             for label, val in tags:
                 op = tags_row.operator('archforge.append_prompt_tag', text=label)
                 op.tag = val
+
+            layout.separator(factor=0.3)
+
+            # Engine and dynamically discovered model
+            engine_card = layout.box()
+            e_header = engine_card.row(align=True)
+            e_header.label(text='Model & Engine', icon='AUTO')
+            e_header.operator('archforge.refresh_models', text='', icon='FILE_REFRESH')
+            e_row = engine_card.row(align=True)
+            e_row.scale_y = 1.15
+            e_row.prop(scene, 'archforge_agent_backend', expand=True)
+            model_prop = 'archforge_antigravity_model' if agent == 'ANTIGRAVITY' else 'archforge_codex_model'
+            custom_prop = 'archforge_antigravity_model_custom' if agent == 'ANTIGRAVITY' else 'archforge_codex_model_custom'
+            engine_card.prop(scene, model_prop, text='Model')
+            if getattr(scene, model_prop, MODEL_DEFAULT) == MODEL_CUSTOM:
+                engine_card.prop(scene, custom_prop, text='Custom model')
 
             layout.separator(factor=0.3)
 
@@ -924,15 +1044,20 @@ class AF_PT_Main(bpy.types.Panel):
             col.use_property_decorate = False
 
             if agent == 'ANTIGRAVITY':
-                col.prop(scene, 'archforge_antigravity_model', text='Model')
-                if getattr(scene, 'archforge_antigravity_model', '') == 'custom':
-                    col.prop(scene, 'archforge_antigravity_model_custom', text='Custom Model')
+                row = col.row(align=True)
+                row.prop(scene, 'archforge_antigravity_model', text='Model')
+                row.operator('archforge.refresh_models', text='', icon='FILE_REFRESH')
+                if scene.archforge_antigravity_model == MODEL_CUSTOM:
+                    col.prop(scene, 'archforge_antigravity_model_custom', text='Custom model')
                 col.prop(scene, 'archforge_antigravity_path', text='CLI Path')
             else:
-                col.prop(scene, 'archforge_codex_model', text='Model')
-                if getattr(scene, 'archforge_codex_model', '') == 'custom':
-                    col.prop(scene, 'archforge_codex_model_custom', text='Custom Model')
+                row = col.row(align=True)
+                row.prop(scene, 'archforge_codex_model', text='Model')
+                row.operator('archforge.refresh_models', text='', icon='FILE_REFRESH')
+                if scene.archforge_codex_model == MODEL_CUSTOM:
+                    col.prop(scene, 'archforge_codex_model_custom', text='Custom model')
                 col.prop(scene, 'archforge_codex_path', text='CLI Path')
+            col.label(text=STATE.get('model_status', 'Models are loaded from the active CLI account.'), icon='INFO')
 
             layout.separator(factor=0.5)
 
@@ -971,6 +1096,7 @@ CLASSES = (
     AF_OT_ClearPrompt,
     AF_OT_ToggleViewportHUD,
     AF_OT_ResetHUDTransform,
+    AF_OT_RefreshModels,
     viewport_hud.AF_OT_ViewportHUDModal,
     AF_PT_Main,
 )
@@ -1008,25 +1134,16 @@ def register():
         ],
         default='ANTIGRAVITY',
     )
+    discover_codex_models()
     bpy.types.Scene.archforge_antigravity_model = EnumProperty(
-        name='Antigravity Model',
-        description='Select model for Antigravity (agy CLI)',
-        items=[
-            ('gemini-3.8-flash-high', 'Gemini 3.8 Flash (High)', 'Google Gemini 3.8 Flash with high reasoning'),
-            ('gemini-3.8-flash-medium', 'Gemini 3.8 Flash (Medium)', 'Google Gemini 3.8 Flash with medium reasoning'),
-            ('gemini-3.8-flash-low', 'Gemini 3.8 Flash (Low)', 'Google Gemini 3.8 Flash with fast reasoning'),
-            ('gemini-3.7-flash-high', 'Gemini 3.7 Flash', 'Google Gemini 3.7 Flash'),
-            ('gemini-3.1-pro-high', 'Gemini 3.1 Pro', 'Google Gemini 3.1 Pro (High)'),
-            ('claude-sonnet-4-6', 'Claude Sonnet 4.6', 'Anthropic Claude Sonnet 4.6 (Thinking)'),
-            ('claude-opus-4-6-thinking', 'Claude Opus 4.6', 'Anthropic Claude Opus 4.6 (Thinking)'),
-            ('custom', 'Custom…', 'Specify custom model identifier'),
-        ],
-        default='gemini-3.8-flash-high',
+        name='Antigravity model',
+        description='Models reported by Antigravity; refresh after signing in',
+        items=model_items_antigravity,
     )
     bpy.types.Scene.archforge_antigravity_model_custom = StringProperty(
-        name='Custom Model',
+        name='Custom model',
         default='',
-        description='Custom model name for Antigravity',
+        description='Custom Antigravity model identifier',
     )
     bpy.types.Scene.archforge_antigravity_path = StringProperty(
         name='Antigravity executable',
@@ -1035,21 +1152,14 @@ def register():
     )
 
     bpy.types.Scene.archforge_codex_model = EnumProperty(
-        name='Codex Model',
-        description='Select model for Codex CLI',
-        items=[
-            ('gpt-5.5', 'GPT-5.5', 'OpenAI GPT-5.5 (Recommended)'),
-            ('gpt-5', 'GPT-5', 'OpenAI GPT-5'),
-            ('gpt-4o', 'GPT-4o', 'OpenAI GPT-4o'),
-            ('o3-mini', 'o3-mini', 'OpenAI o3-mini'),
-            ('custom', 'Custom…', 'Specify custom model identifier'),
-        ],
-        default='gpt-5.5',
+        name='Codex model',
+        description='Models available in the current Codex account cache',
+        items=model_items_codex,
     )
     bpy.types.Scene.archforge_codex_model_custom = StringProperty(
-        name='Custom Model',
+        name='Custom model',
         default='',
-        description='Custom model name passed to --model flag',
+        description='Custom Codex model identifier passed with --model',
     )
     bpy.types.Scene.archforge_codex_path = StringProperty(
         name='Codex executable',
@@ -1091,6 +1201,7 @@ def register():
 
     sketch.register_overlay()
     viewport_hud.register_hud()
+    refresh_models_async()
     bpy.app.timers.register(timer, first_interval=.1, persistent=True)
 
 

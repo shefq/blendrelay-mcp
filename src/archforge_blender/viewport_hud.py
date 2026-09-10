@@ -25,20 +25,61 @@ PRESETS = [
     'centered at origin with clean subdivision topology',
 ]
 
-MODELS_ANTIGRAVITY = [
-    ('gemini-3.8-flash-high', 'Flash 3.8 High'),
-    ('gemini-3.8-flash-medium', 'Flash 3.8 Med'),
-    ('gemini-3.1-pro-high', 'Gemini 3.1 Pro'),
-    ('claude-sonnet-4-6', 'Claude Sonnet'),
-    ('claude-opus-4-6-thinking', 'Claude Opus'),
-]
+def _get_model_list(agent):
+    from . import bridge_ui
+    return bridge_ui._MODEL_ITEMS[agent]
 
-MODELS_CODEX = [
-    ('gpt-5.5', 'GPT-5.5'),
-    ('gpt-5', 'GPT-5'),
-    ('gpt-4o', 'GPT-4o'),
-    ('o3-mini', 'o3-mini'),
-]
+
+def _get_selected_model(scene, agent):
+    from . import bridge_ui
+    return bridge_ui.selected_model(scene, agent)
+
+
+def _format_model_short(mid, mname):
+    """Format short concise name for the floating HUD chip."""
+    if not mid:
+        return 'Model'
+    if '3.8-flash' in mid:
+        return 'Flash 3.8' + (' Med' if 'med' in mid else (' Low' if 'low' in mid else ' High'))
+    if '3.7-flash' in mid:
+        return 'Flash 3.7'
+    if '3.6-flash' in mid:
+        return 'Flash 3.6'
+    if '3.1-pro' in mid:
+        return 'Pro 3.1'
+    if 'claude-sonnet' in mid:
+        return 'Sonnet 4.6'
+    if 'claude-opus' in mid:
+        return 'Opus 4.6'
+    if 'gpt-oss' in mid:
+        return 'GPT-OSS'
+    if 'gpt-6-astra' in mid or 'astra' in mid:
+        return 'GPT-6 Astra'
+    if 'gpt-6' in mid:
+        return 'GPT-6'
+    if 'gpt-5.6-sol' in mid or 'sol' in mid:
+        return 'GPT-5.6 Sol'
+    if 'gpt-5.6-terra' in mid or 'terra' in mid:
+        return 'GPT-5.6 Terra'
+    if 'gpt-5.6-luna' in mid or 'luna' in mid:
+        return 'GPT-5.6 Luna'
+    if 'gpt-5.6' in mid:
+        return 'GPT-5.6'
+    if 'gpt-5.5' in mid:
+        return 'GPT-5.5'
+    if 'gpt-5-mini' in mid:
+        return 'GPT-5 Mini'
+    if 'gpt-5' in mid:
+        return 'GPT-5'
+    if 'gpt-4o' in mid:
+        return 'GPT-4o'
+    if 'o3-mini' in mid:
+        return 'o3-mini'
+    if 'o3' in mid:
+        return 'o3'
+    if 'o1' in mid:
+        return 'o1'
+    return mname[:14]
 
 # ── Global HUD State ─────────────────────────────────────────────────────────
 
@@ -222,15 +263,9 @@ def draw_viewport_hud():
     only_selected = getattr(scene, 'archforge_only_selected', False)
     active_tab = getattr(scene, 'archforge_ui_tab', 'GENERATE')
 
-    # Model friendly name
-    if agent == 'ANTIGRAVITY':
-        cur_model = getattr(scene, 'archforge_antigravity_model', 'gemini-3.8-flash-high')
-        model_map = dict(MODELS_ANTIGRAVITY)
-        model_label = model_map.get(cur_model, cur_model[:12])
-    else:
-        cur_model = getattr(scene, 'archforge_codex_model', 'gpt-5.5')
-        model_map = dict(MODELS_CODEX)
-        model_label = model_map.get(cur_model, cur_model[:12])
+    # Dynamic model friendly name
+    cur_model = _get_selected_model(scene, agent)
+    model_label = _format_model_short(cur_model, cur_model) if cur_model else 'CLI default'
 
     rw = region.width
     rh = region.height
@@ -835,19 +870,18 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                # 7. Model Chip (Cycle model options)
+                # 7. Model Chip (cycle through dynamically discovered choices)
                 if is_inside(bounds.get('chip_model')):
+                    from . import bridge_ui
                     agent = context.scene.archforge_agent_backend
-                    if agent == 'ANTIGRAVITY':
-                        cur = context.scene.archforge_antigravity_model
-                        keys = [k for k, _ in MODELS_ANTIGRAVITY]
-                        idx = (keys.index(cur) + 1) % len(keys) if cur in keys else 0
-                        context.scene.archforge_antigravity_model = keys[idx]
-                    else:
-                        cur = context.scene.archforge_codex_model
-                        keys = [k for k, _ in MODELS_CODEX]
-                        idx = (keys.index(cur) + 1) % len(keys) if cur in keys else 0
-                        context.scene.archforge_codex_model = keys[idx]
+                    model_prop = 'archforge_antigravity_model' if agent == 'ANTIGRAVITY' else 'archforge_codex_model'
+                    choices = [item[0] for item in _get_model_list(agent) if item[0] != bridge_ui.MODEL_CUSTOM]
+                    current = getattr(context.scene, model_prop, bridge_ui.MODEL_DEFAULT)
+                    index = (choices.index(current) + 1) % len(choices) if current in choices else 0
+                    setattr(context.scene, model_prop, choices[index])
+                    selected = bridge_ui.selected_model(context.scene, agent)
+                    HUD_STATE['flash_msg'] = f"Model: {selected or 'CLI default'}"
+                    HUD_STATE['flash_time'] = time.monotonic()
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
