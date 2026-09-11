@@ -9,6 +9,7 @@ import sys
 import time
 from archforge_domain.model import DomainError
 from archforge_runtime.protocol import Client, data_dir
+from .job_results import wait_and_compact
 
 S=lambda **properties:{'type':'object','properties':properties,'additionalProperties':False}
 STR={'type':'string'};INT={'type':'integer'};NUM={'type':'number'}
@@ -19,9 +20,9 @@ def tool(name,method,description,properties=None,required=(),read=False,preappro
     TOOLS[name]={'name':name,'description':description,'inputSchema':schema,'annotations':{'readOnlyHint':read,'destructiveHint':not (read or preapproved),'openWorldHint':False},'_method':method}
 
 tool('archforge_blender_sessions','blender.sessions','List live general-purpose Blender connections; no architecture project is required.',read=True)
-tool('archforge_blender_command','blender.submit','Operate on the open Blender scene. Actions: inspect (offset, limit, object_name, names=[...]), execute (code, label, save_checkpoint=False), execute_code (code - fastest), get_scene_info (compact 20-object summary), get_object_info (name - AABB+mesh detail for one object), versions, checkpoint (label), restore (version_id), screenshot. inspect with names=[list_of_names] does targeted Unicode-safe lookup with AABB detail. execute runs Python scene edits without continuous checkpoint overhead; checkpoints are saved after the AI generation process completes. NEVER call restore on execution errors. Returns a job; poll archforge_blender_job until complete/failed.',
-     {'operation_id':STR,'action':{'enum':['inspect','execute','execute_code','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot']},'arguments':{'type':'object'},'instance_id':STR},('action',),preapproved=True)
-tool('archforge_blender_job','blender.job','Read the result of a general Blender operation; interrupted jobs must not be blindly retried with a new ID.',{'operation_id':STR,'instance_id':STR},('operation_id',),True)
+tool('archforge_blender_command','blender.submit','Edit live Blender. inspect takes names=[...]; execute takes code for arbitrary edits. mesh_edit takes operation (bevel, extrude, inset, bridge, move_normal, assign_material), distance in local mesh units, segments, material; uses current Edit Mode selection. validate_selection takes names and reports mesh defects. screenshot takes max_dimension (default 512). Waits up to wait_seconds (default 8, max 30); complete results need no polling. Poll only queued/running jobs. Never blindly resubmit an edit. Preserve unrelated content; use targeted inspection.',
+     {'operation_id':STR,'action':{'enum':['inspect','execute','execute_code','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot','mesh_edit','validate_selection']},'arguments':{'type':'object'},'instance_id':STR,'wait_seconds':NUM,'repeat_result':{'type':'boolean'}},('action',),preapproved=True)
+tool('archforge_blender_job','blender.job','Wait for a queued/running job. Terminal results need no polling. Repeated results are suppressed unless repeat_result=true. Interrupted jobs must not be blindly retried.',{'operation_id':STR,'instance_id':STR,'wait_seconds':NUM,'repeat_result':{'type':'boolean'}},('operation_id',),True)
 
 tool('archforge_get_capabilities','capabilities','Supported ArchForge operations, asset families, and release limits.',read=True)
 tool('archforge_list_projects','project.list','List persistent local projects.',read=True)
@@ -77,8 +78,9 @@ def handle(message,client):
         schema=definition['inputSchema']
         if not isinstance(args,dict) or set(args)-set(schema['properties']) or set(schema['required'])-set(args):raise DomainError('INVALID_ARGUMENTS','Unknown or missing tool fields')
         try:
-            result=client.call(definition['_method'],args)
-            if name=='archforge_blender_job' and isinstance(result.get('result'),dict) and result['result'].get('image'):
+            result=(wait_and_compact(client,definition['_method'],args)
+                    if name in ('archforge_blender_command','archforge_blender_job') else client.call(definition['_method'],args))
+            if name in ('archforge_blender_command','archforge_blender_job') and isinstance(result.get('result'),dict) and result['result'].get('image'):
                 content=[{'type':'image','data':result['result']['image'],'mimeType':result['result']['mime_type']}]
                 if result['result'].get('path'):content.append({'type':'text','text':f"Viewport render saved to: {result['result']['path']}"})
                 return {'content':content,'isError':False}
@@ -90,9 +92,9 @@ def handle(message,client):
                 data=b''.join(chunks)
                 if mime in ('image/png','image/jpeg'):return {'content':[{'type':'image','data':base64.b64encode(data).decode(),'mimeType':mime}]}
                 return {'content':[{'type':'text','text':data.decode('utf-8')}]}
-            return {'content':[{'type':'text','text':json.dumps(result,ensure_ascii=False)}],'isError':False}
-        except (DomainError,OSError) as e:
-            error=e.as_dict() if isinstance(e,DomainError) else {'code':'RUNTIME_OFFLINE','message':str(e)}
+            return {'content':[{'type':'text','text':json.dumps(result,ensure_ascii=False)}],'isError':isinstance(result,dict) and result.get('status') in ('failed','interrupted')}
+        except (DomainError,OSError,ValueError) as e:
+            error=e.as_dict() if isinstance(e,DomainError) else {'code':'INVALID_ARGUMENTS' if isinstance(e,ValueError) else 'RUNTIME_OFFLINE','message':str(e)}
             return {'content':[{'type':'text','text':json.dumps(error)}],'isError':True}
     raise DomainError('METHOD_NOT_FOUND',str(method))
 

@@ -11,7 +11,7 @@ import traceback
 import unicodedata
 import uuid
 import bpy
-from . import sketch
+from . import sketch, edit_context
 
 
 # ── Version / checkpoint helpers ─────────────────────────────────────────────
@@ -262,7 +262,7 @@ def inspect_scene(offset=0, limit=20, object_name=None, names=None):
             else:
                 result_objs.append({'name': n, 'error': 'not found'})
         return dict(scene=bpy.context.scene.name, filepath=bpy.data.filepath,
-                    mode=bpy.context.mode, total=len(all_objects),
+                    mode=bpy.context.mode, mesh_edit=edit_context.capture(bpy.context), total=len(all_objects),
                     only_selected=only_selected,
                     selection=[o.name for o in bpy.context.selected_objects],
                     viewport_sketch=sketch.payload(bpy.context.scene),
@@ -274,7 +274,7 @@ def inspect_scene(offset=0, limit=20, object_name=None, names=None):
         filtered = all_objects
 
     return dict(scene=bpy.context.scene.name, filepath=bpy.data.filepath,
-                mode=bpy.context.mode, total=len(filtered),
+                mode=bpy.context.mode, mesh_edit=edit_context.capture(bpy.context), total=len(filtered),
                 only_selected=only_selected,
                 selection=[o.name for o in bpy.context.selected_objects],
                 viewport_sketch=sketch.payload(bpy.context.scene),
@@ -282,15 +282,7 @@ def inspect_scene(offset=0, limit=20, object_name=None, names=None):
 
 
 def restore_viewport_state():
-    """Ensure viewport overlays remain enabled, mode is OBJECT, and objects are selectable."""
-    try:
-        # Return to Object Mode if left in Edit/Sculpt/Paint mode
-        if hasattr(bpy.context, 'mode') and bpy.context.mode != 'OBJECT':
-            if hasattr(bpy.ops.object, 'mode_set') and bpy.ops.object.mode_set.poll():
-                bpy.ops.object.mode_set(mode='OBJECT')
-    except Exception:
-        pass
-
+    """Ensure viewport overlays and selection remain visible without changing editing mode."""
     try:
         # Ensure Viewport Overlays and Selection Highlighting are active across all 3D viewports
         wm = getattr(bpy.context, 'window_manager', None)
@@ -328,6 +320,7 @@ def execute_code(code, label='Prompt edit'):
     except (UnicodeDecodeError, UnicodeEncodeError):
         pass
     bpy_proxy, mathutils = _make_bpy_proxy()
+    editing_state = edit_context.remember()
     namespace = {'bpy': bpy_proxy, 'mathutils': mathutils, '__name__': '__archforge__'}
     try:
         compiled = compile(code, '<ArchForge MCP>', 'exec')
@@ -342,6 +335,10 @@ def execute_code(code, label='Prompt edit'):
     except Exception:
         return {'executed': False, 'error': traceback.format_exc()[-8000:]}
     finally:
+        try:
+            edit_context.restore(editing_state)
+        except Exception as error:
+            print("ArchForge could not restore editing mode:", error)
         restore_viewport_state()
 
 
@@ -358,6 +355,7 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
     except (UnicodeDecodeError, UnicodeEncodeError):
         pass
     bpy_proxy, mathutils = _make_bpy_proxy()
+    editing_state = edit_context.remember()
     namespace = {'bpy': bpy_proxy, 'mathutils': mathutils, '__name__': '__archforge__'}
     should_checkpoint = bool(save_checkpoint or kwargs.get('checkpoint', False))
     before = checkpoint(root, 'Before: ' + label) if should_checkpoint else None
@@ -385,6 +383,10 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
             res['before'] = before
         return res
     finally:
+        try:
+            edit_context.restore(editing_state)
+        except Exception as error:
+            print("ArchForge could not restore editing mode:", error)
         restore_viewport_state()
 
 
@@ -430,7 +432,7 @@ def draw_sketch_on_image(path, strokes):
     bpy.data.images.remove(image)
 
 
-def screenshot(root, context=None):
+def screenshot(root, context=None, max_dimension=512):
     import base64
     area = (getattr(context, 'area', None)
             if context and getattr(context, 'area', None) and context.area.type == 'VIEW_3D'
@@ -456,7 +458,7 @@ def screenshot(root, context=None):
            r.resolution_percentage, r.image_settings.file_format)
     path = Path(root) / 'sketch_viewport.png'
     try:
-        max_dim = 800
+        max_dim = max(128, min(1920, int(max_dimension)))
         rw, rh = max(1, region.width), max(1, region.height)
         if rw >= rh:
             r.resolution_x = max_dim
@@ -537,5 +539,8 @@ def run(root, job):
     if action == 'restore':
         return restore(root, **args)
     if action == 'screenshot':
-        return screenshot(root)
+        return screenshot(root, **args)
+    if action in ('mesh_edit', 'validate_selection'):
+        from . import mesh_tools
+        return mesh_tools.edit(**args) if action == 'mesh_edit' else mesh_tools.validate(**args)
     raise ValueError('Unknown Blender action: ' + action)

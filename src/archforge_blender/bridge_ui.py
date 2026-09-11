@@ -14,6 +14,7 @@ import bpy
 from mathutils import Vector
 from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, FloatProperty, CollectionProperty
 from .client import Connection,default_root
+from . import edit_context, workflow, run_metrics, conversation
 from . import general, sketch, viewport_hud
 
 STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
@@ -226,7 +227,7 @@ def add_reference_images(context, paths):
     return added, combined
 
 
-def capture_selection_views(root, run_id, selected_objects):
+def capture_selection_views(root, run_id, selected_objects, angles=(35.0, 155.0, 275.0)):
     """Render three lightweight overview images framing the complete selection."""
     objects = [obj for obj in selected_objects if obj and obj.name in bpy.context.scene.objects]
     if not objects:
@@ -261,7 +262,6 @@ def capture_selection_views(root, run_id, selected_objects):
     camera.data.clip_start = 0.01
     camera.data.clip_end = max(distance * 8.0, 1000.0)
     paths = []
-    angles = (35.0, 155.0, 275.0)
     try:
         scene.camera = camera
         render.engine = 'BLENDER_WORKBENCH'
@@ -348,6 +348,20 @@ def log_agent_stream(line, agent_name, log_file, collected_text):
     if not line_clean:
         return
 
+    if agent_name == 'Codex' and line_clean.startswith('{'):
+        try:
+            event = json.loads(line_clean)
+            item = event.get('item', {})
+            if event.get('type') == 'item.completed' and item.get('type') == 'agent_message':
+                message = item.get('text', '')
+                collected_text.append(message + '\n')
+                print(message, flush=True)
+            elif event.get('type') in ('error', 'turn.failed'):
+                print('[Codex] ' + str(event.get('message', event.get('error', event))), flush=True)
+            return
+        except ValueError:
+            pass
+
     # Handle Antigravity stream-json events
     if agent_name == 'Antigravity' and line_clean.startswith('{'):
         try:
@@ -417,11 +431,20 @@ def log_agent_stream(line, agent_name, log_file, collected_text):
         collected_text.append(line)
 
 
-def run_agent_reader(process, log_path, agent_name, final_path):
+def run_agent_reader(process, log_path, agent_name, final_path, conversation_path=None, backend=None):
     collected_text = []
+    metrics = run_metrics.Metrics()
     try:
         with open(log_path, 'w', encoding='utf-8') as log_file:
             for line in iter(process.stdout.readline, ''):
+                identifier = conversation.event_id(line)
+                if identifier and conversation_path:
+                    try:
+                        conversation.save(conversation_path, backend, identifier)
+                    except OSError as error:
+                        print('Conversation ID could not be saved:', error, flush=True)
+                    conversation_path = None  # Persist immediately, once per run.
+                metrics.feed(line)
                 log_agent_stream(line, agent_name, log_file, collected_text)
     except Exception as e:
         print(f"[{agent_name}] Stream reader error: {e}", flush=True)
@@ -429,6 +452,16 @@ def run_agent_reader(process, log_path, agent_name, final_path):
         try:
             process.stdout.close()
         except Exception:
+            pass
+        report = metrics.summary()
+        try:
+            report['prompt_bytes'] = Path(log_path).with_suffix('.prompt.txt').stat().st_size
+        except OSError:
+            pass
+        STATE['last_usage'] = report
+        try:
+            Path(log_path).with_suffix('.usage.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
+        except OSError:
             pass
         if final_path and collected_text and not Path(final_path).exists():
             try:
@@ -447,6 +480,12 @@ def start_agent(context, prompt_override=None):
     agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
     if not prompt:
         raise RuntimeError(f'Enter a prompt for {agent_name}')
+
+    mesh_edit = edit_context.capture(context)
+    if mesh_edit and not mesh_edit['selected_count']:
+        raise RuntimeError('Select vertices, edges or faces before sending an Edit Mode prompt.')
+    if context.mode.startswith('EDIT_') and mesh_edit is None:
+        raise RuntimeError('Selection-aware prompts currently support mesh Edit Mode. Switch to Object Mode for this object type.')
 
     ensure_connected(context)
 
@@ -474,6 +513,10 @@ def start_agent(context, prompt_override=None):
         model = selected_model(context.scene, agent)
 
     root = Path(STATE['root'] or context.scene.archforge_runtime_dir).resolve()
+    if not context.scene.get('archforge_workspace_id'):
+        context.scene['archforge_workspace_id'] = uuid.uuid4().hex
+    conversation_path = root / 'conversations' / (context.scene['archforge_workspace_id'] + '.json')
+    resume_id = conversation.load(conversation_path).get(agent) if context.scene.archforge_continue_conversation else None
     sketch_data = sketch.payload(context.scene)
     sketch_viewport = STATE.get('sketch_viewport')
     if sketch_data['stroke_count'] and not sketch_viewport:
@@ -489,13 +532,22 @@ def start_agent(context, prompt_override=None):
     if only_selected and not context.selected_objects:
         raise RuntimeError('No objects selected. Select at least one object in the 3D Viewport or disable "Only selected objects".')
 
-    selected_objs = selection_context(context) if (context.scene.archforge_include_selection or only_selected) else []
+    selected_objs = selection_context(context) if (mesh_edit or context.scene.archforge_include_selection or only_selected) else []
     selection_view_paths = []
-    if context.selected_objects:
+    if context.selected_objects and not mesh_edit:
         try:
-            selection_view_paths = capture_selection_views(root, run_id, context.selected_objects)
+            selection_view_paths = capture_selection_views(root, run_id, context.selected_objects, angles=(35.0,) if workflow.choose(context.scene.archforge_task_mode, prompt, True) == 'EDIT' else (35.0,155.0,275.0))
         except Exception as error:
             STATE['status'] = f'Selected-object image capture unavailable: {error}'
+    if mesh_edit:
+        try:
+            capture = general.screenshot(root, context=context)
+            source = Path(capture['path'])
+            image = root / 'agent_runs' / (run_id + '-edit-selection' + source.suffix)
+            shutil.copyfile(source, image)
+            selection_view_paths = [str(image)]
+        except Exception as error:
+            STATE['status'] = f'Edit selection capture unavailable: {error}'
     reference_image_paths = reference_images(context.scene)
     ref_image_path = Path(reference_image_paths[0]) if reference_image_paths else None
     has_ref_image = bool(ref_image_path)
@@ -516,85 +568,15 @@ def start_agent(context, prompt_override=None):
     }
     workdir = Path(bpy.data.filepath).parent if bpy.data.filepath else Path(root)
 
-    # Build system instructions using blender-mcp-inspired efficient workflow
-    selected_hint = ''
-    if context_text.get('selected_objects'):
-        sel_names = [o['name'] for o in context_text['selected_objects']]
-        if only_selected:
-            selected_hint = (
-                f'\nRESTRICTED SCOPE — ONLY SELECTED OBJECTS: {sel_names}\n'
-                'The user has enabled "Only selected objects". ONLY these selected objects are fed to you.\n'
-                f'You must strictly restrict your actions, edits, and inspections to: {sel_names}.\n'
-                'Do NOT modify, delete, or inspect any other objects in the scene.\n'
-                'Use archforge_blender_command action="inspect" arguments={"names": [<those names>]} '
-                'to get their AABB and geometry in ONE call. Then execute immediately.'
-            )
-        else:
-            selected_hint = (
-                f'\nSELECTED OBJECTS (already in context, no lookup needed): {sel_names}\n'
-                'Use archforge_blender_command action="inspect" arguments={"names": [<those names>]} '
-                'to get their AABB and geometry in ONE call. Then execute immediately.'
-            )
-    selection_views_hint = ''
-    if selection_view_paths:
-        selection_views_hint = (
-            '\nSELECTED-OBJECT REFERENCE VIEWS:\n'
-            'Three low-resolution images, each framing the full current selection from a different angle, '
-            'are attached below. Inspect them before modifying the selected objects.\n'
-        )
-    if auto_verify:
-        verify_step = (
-            '  5. VISUAL VERIFICATION & SELF-CORRECTION LOOP (REQUIRED):\n'
-            '     - Immediately after executing your scene modifications, call action="screenshot" to render the 3D viewport.\n'
-            '     - Critically evaluate the rendered result against the user prompt and reference images:\n'
-            '       * Check for missing geometry, broken walls/roofs, or misplaced assets.\n'
-            '       * Check for floating meshes, clipping/interpenetrating objects, or distorted scales.\n'
-            '       * Ensure materials and colors are visually appealing and properly assigned.\n'
-            '     - If ANY issues, defects, or missing elements are discovered:\n'
-            '       Execute targeted corrective Python code using action="execute" (or "execute_code") to fix them.\n'
-            '       Take one final action="screenshot" to verify the scene looks clean and complete.\n'
-            '     - Finish only when the scene is visually confirmed.\n'
-        )
-        loop_rule = '  - Execute all operations synchronously. Limit self-correction to 1-2 targeted fix passes.\n'
-    else:
-        verify_step = ''
-        loop_rule = '  - Do NOT loop inspect/execute more than 3 times. Execute all operations synchronously.\n'
-    system_instructions = (
-        f'You are an AI agent controlling the user\'s open Blender 3D scene via the ArchForge MCP server '
-        f"(backend: {agent_name}, model override: {model or 'CLI default'}).\n"
-        f'The active Blender instance ID is "{STATE["instance"]}". '
-        'Always pass instance_id in archforge_blender_command calls.\n\n'
-        'EFFICIENT WORKFLOW (follow in order, minimum tool calls):\n'
-        '  1. Call archforge_blender_sessions — confirm Blender is live.\n'
-        '  2. If sketch_viewport_image is in context: call action="screenshot" ONCE.\n'
-        '  3. Get scene info using ONE of these options (pick the most targeted):\n'
-        '     a) action="get_scene_info" — compact list of all objects (fastest, no detail)\n'
-        '     b) action="inspect" arguments={"names": ["ObjA","ObjB"]} — AABB+detail for specific objects\n'
-        '     c) action="get_object_info" arguments={"name":"ObjectName"} — full detail for one object\n'
-        '     Do NOT call inspect, get_scene_info, or get_object_info more than 2 times total.\n'
-        '  4. Write and execute your scene edits using action="execute":\n'
-        '     - DO NOT run exploratory test scripts (e.g. testing python or bmesh); Blender is ready.\n'
-        '     - When writing generation code, define all materials, variables, and helper functions AT THE TOP '
-        'of your script before creating any mesh geometry to prevent NameError midway.\n'
-        '     - In execute code: bpy and mathutils are pre-imported.\n'
-        '     - NEVER use bpy.data.objects["Name with · dots"] by string literal — Unicode gets corrupted. '
-        'Instead: `obj = next((o for o in bpy.data.objects if keyword in o.name.lower()), None)` '
-        'or use bpy.context.selected_objects directly.\n'
-        '     - Set result = {...} in your execute code to return data.\n\n'
-        f'{verify_step}\n'
-        'CRITICAL RULES:\n'
-        '  - NEVER call action="restore" on error or failure! Restoring reverts the scene and DELETES '
-        'all newly created objects (such as parts of a model). If code fails midway, fix the bug in your code '
-        'and continue building from where you left off, or inspect what was already created.\n'
-        '  - Do NOT call action="checkpoint" manually. A checkpoint is automatically saved after the AI '
-        'generation process completes.\n'
-        f'{loop_rule}'
-        '  - Do not read schema files. Do not schedule background tasks.\n'
-        f'{selected_hint}{selection_views_hint}'
-    )
+    task_mode = workflow.choose(context.scene.archforge_task_mode, prompt, bool(context.selected_objects))
+    verification = context.scene.archforge_verification
+    visual = verification == 'VISUAL' or (verification == 'AUTO' and auto_verify)
+    system_instructions = workflow.instructions(task_mode, STATE['instance'], bool(mesh_edit), visual, only_selected)
 
     # Compact context JSON (trim large arrays to avoid hitting CLI arg limits)
     compact_ctx = {
+        'mode': context.mode,
+        'mesh_edit': mesh_edit,
         'scene': context_text['scene'],
         'blend_file': context_text['blend_file'],
         'instance_id': context_text['archforge_instance_id'],
@@ -607,7 +589,8 @@ def start_agent(context, prompt_override=None):
         'sketch_viewport_image': context_text['sketch_viewport_image'],
         'reference_images': context_text['reference_images'],
     }
-    context_snippet = json.dumps(compact_ctx, ensure_ascii=False)
+    compact_ctx = workflow.compact(compact_ctx)
+    context_snippet = json.dumps(compact_ctx, ensure_ascii=False, separators=(',', ':'))
 
     vision_image_path = ref_image_path
     if has_ref_image:
@@ -672,6 +655,7 @@ def start_agent(context, prompt_override=None):
                 '--dangerously-skip-permissions',
                 *( ['--model', model] if model else [] ),
                 '--input-format', 'text',
+                *(['--conversation', resume_id] if resume_id else []),
                 '--output-format', 'stream-json',
                 '--print-timeout', '10m',
             ]
@@ -684,15 +668,17 @@ def start_agent(context, prompt_override=None):
         image_paths = reference_vision_paths + selection_view_paths
         args = [
             str(executable),
-            'exec',
+            'exec', '--sandbox', 'workspace-write', '--cd', str(workdir),
+            *(['resume', resume_id] if resume_id else []), '--json',
             *( ['--image', *image_paths] if image_paths else [] ),
             *( ['--skip-git-repo-check'] if workdir == root or root in workdir.parents else [] ),
             *( ['--model', model] if model else [] ),
-            '--sandbox', 'workspace-write',
-            '--cd', str(workdir),
             '--output-last-message', str(final_path),
-            full_instructions,  # Codex positional arg (runtime handles encoding)
+            '-',  # Read prompt from stdin, including potentially large mesh selections.
         ]
+
+    if agent == 'CODEX':
+        use_stdin = True
 
     print("\n" + "=" * 60, flush=True)
     print(f"[ArchForge] Starting {agent_name} task (Model: {model or 'CLI default'})", flush=True)
@@ -747,7 +733,7 @@ def start_agent(context, prompt_override=None):
 
     reader_thread = threading.Thread(
         target=run_agent_reader,
-        args=(process, log_path, agent_name, final_path),
+        args=(process, log_path, agent_name, final_path, conversation_path if context.scene.archforge_continue_conversation else None, agent),
         daemon=True,
     )
     reader_thread.start()
@@ -1182,6 +1168,24 @@ class AF_OT_AppendPromptTag(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class AF_OT_NewConversation(bpy.types.Operator):
+    bl_idname = 'archforge.new_conversation'
+    bl_label = 'New Conversation'
+    bl_description = 'Start a fresh conversation for this workspace and backend'
+
+    def execute(self, context):
+        process = STATE.get('agent_process') or STATE.get('codex_process')
+        if process and process.poll() is None:
+            self.report({'WARNING'}, 'Wait for the current task to finish')
+            return {'CANCELLED'}
+        workspace = context.scene.get('archforge_workspace_id')
+        if workspace:
+            root = Path(STATE['root'] or context.scene.archforge_runtime_dir)
+            conversation.save(root / 'conversations' / (workspace + '.json'), context.scene.archforge_agent_backend, None)
+        self.report({'INFO'}, 'The next prompt will start a new conversation')
+        return {'FINISHED'}
+
+
 class AF_OT_ClearPrompt(bpy.types.Operator):
     bl_idname = 'archforge.clear_prompt'
     bl_label = 'Clear prompt'
@@ -1347,19 +1351,42 @@ class AF_PT_Main(bpy.types.Panel):
 
             layout.separator(factor=0.3)
 
+            layout.prop(scene, 'archforge_task_mode')
+            layout.prop(scene, 'archforge_verification')
+            row = layout.row(align=True)
+            row.prop(scene, 'archforge_continue_conversation')
+            row.operator('archforge.new_conversation', text='New Conversation')
+            usage = STATE.get('last_usage', {})
+            if usage:
+                summary = usage.get('provider_usage', {})
+                card = layout.box()
+                card.label(text='Last run usage (provider reported)')
+                for key in ('input_tokens','output_tokens','cache_read_tokens','cached_input_tokens','thinking_tokens'):
+                    if key in summary:
+                        card.label(text=key.replace('_',' ') + ': ' + format(summary[key], ','))
+                card.label(text='Tool calls: ' + str(sum(usage.get('tool_calls_by_stage', {}).values())))
+                if usage.get('warnings'):
+                    card.label(text='Repeated requests detected; see .usage.json', icon='INFO')
             # Target Scope Card
             scope_card = layout.box()
             sc_header = scope_card.row(align=True)
-            sc_header.label(text='Target Scope', icon='OBJECT_DATAMODE')
+            sc_header.label(text='Mesh Selection' if context.mode == 'EDIT_MESH' else 'Target Scope', icon='EDITMODE_HLT' if context.mode == 'EDIT_MESH' else 'OBJECT_DATAMODE')
             num_sel = len(context.selected_objects)
-            sc_header.label(text=f'({num_sel} selected)')
+            if context.mode == 'EDIT_MESH':
+                meshes = [obj.data for obj in context.objects_in_mode_unique_data if obj.type == 'MESH']
+                counts = [sum(getattr(mesh, prop, 0) for mesh in meshes) for prop in ('total_vert_sel', 'total_edge_sel', 'total_face_sel')]
+                sc_header.label(text=f'{counts[0]} V / {counts[1]} E / {counts[2]} F')
+            else:
+                sc_header.label(text=f'({num_sel} selected)')
 
             sc_row = scope_card.row(align=True)
-            sc_row.prop(scene, 'archforge_include_selection', toggle=True)
-            sc_row.prop(scene, 'archforge_only_selected', toggle=True)
+            include_row = sc_row.row(align=True)
+            include_row.enabled = context.mode != 'EDIT_MESH'
+            include_row.prop(scene, 'archforge_include_selection', text='Mesh context included' if context.mode == 'EDIT_MESH' else 'Include selection', toggle=True)
+            sc_row.prop(scene, 'archforge_only_selected', text='Only selected geometry' if context.mode == 'EDIT_MESH' else 'Only selected objects', toggle=True)
 
             if getattr(scene, 'archforge_only_selected', False):
-                scope_card.label(text='🎯 Restricted: ONLY selected objects fed to model', icon='RESTRICT_SELECT_OFF')
+                scope_card.label(text='Target: selected vertices / edges / faces' if context.mode == 'EDIT_MESH' else 'Target: selected objects', icon='RESTRICT_SELECT_OFF')
 
             layout.separator(factor=0.4)
 
@@ -1477,6 +1504,7 @@ class AF_PT_Main(bpy.types.Panel):
 
 
 CLASSES = (
+    AF_OT_NewConversation,
     AF_OT_Connect,
     AF_OT_Disconnect,
     AF_OT_Checkpoint,
@@ -1506,6 +1534,9 @@ CLASSES = (
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    bpy.types.Scene.archforge_continue_conversation = BoolProperty(name='Continue conversation', description='Resume this workspace conversation with fresh scene context', default=False)
+    bpy.types.Scene.archforge_task_mode = EnumProperty(name='Workflow', items=[('AUTO','Auto','Choose based on selection and request'),('EDIT','Focused Edit','Targeted edits with corrections when needed'),('BUILD','Build','Larger scene work')],default='AUTO')
+    bpy.types.Scene.archforge_verification = EnumProperty(name='Verification',items=[('AUTO','Auto','Geometry checks and relevant visuals when Auto-Verify is enabled'),('GEOMETRY','Geometry','Geometry checks without final images'),('VISUAL','Geometry + Visual','Geometry checks and targeted visual verification')],default='AUTO')
     bpy.types.Scene.archforge_runtime_dir = StringProperty(name='Runtime', subtype='DIR_PATH', default=default_root())
     bpy.types.Scene.archforge_codex_prompt = StringProperty(name='Prompt', default='')
     bpy.types.Scene.archforge_auto_verify = BoolProperty(
@@ -1516,7 +1547,7 @@ def register():
     bpy.types.Scene.archforge_include_selection = BoolProperty(name='Include selected objects', default=True)
     bpy.types.Scene.archforge_only_selected = BoolProperty(
         name='Only selected objects',
-        description='Feed ONLY selected objects to the model and restrict its operations to them',
+        description='Restrict edits to selected objects, or selected mesh elements in Edit Mode',
         default=False,
     )
     bpy.types.Scene.archforge_ui_tab = EnumProperty(
@@ -1631,6 +1662,9 @@ def unregister():
     sketch.unregister_overlay()
     viewport_hud.unregister_hud()
     props_to_del = [
+        'archforge_task_mode',
+        'archforge_continue_conversation',
+        'archforge_verification',
         'archforge_runtime_dir',
         'archforge_codex_prompt',
         'archforge_include_selection',

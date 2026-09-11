@@ -49,7 +49,7 @@ class Bridge:
         return {'command':None}
 
     def rpc_blender_submit(self, operation_id=None, action=None, arguments=None, instance_id=None):
-        if action not in ('inspect','execute','execute_code','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot'):
+        if action not in ('inspect','execute','execute_code','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot','mesh_edit','validate_selection'):
             raise DomainError('UNKNOWN_ACTION',action)
         # Auto-generate a unique operation_id if not supplied
         if not operation_id:
