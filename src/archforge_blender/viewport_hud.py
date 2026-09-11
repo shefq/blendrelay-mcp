@@ -419,7 +419,7 @@ def draw_viewport_hud():
     # Mode Tabs (Generate, Sketch, Versions, Settings)
     tabs = [
         ('GENERATE', '✦ Generate'),
-        ('SKETCH', '✎ Sketch'),
+        ('SKETCH', 'Sketch & Region'),
         ('HISTORY', '⏱ Versions'),
         ('SETTINGS', '⚙ Settings'),
     ]
@@ -438,7 +438,7 @@ def draw_viewport_hud():
                 border_color=(0.0, 0.75, 1.0, 0.7),
                 border_width=max(0.8, 1.0 * scale),
             )
-            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=11 * scale, color=(1.0, 1.0, 1.0, 1.0))
+            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=(8 if tid == 'SKETCH' else 11) * scale, color=(1.0, 1.0, 1.0, 1.0))
         elif is_t_hover:
             _draw_rounded_box(
                 tx, top_y, tab_w, top_h, 12.0 * scale,
@@ -446,9 +446,9 @@ def draw_viewport_hud():
                 border_color=(0.30, 0.40, 0.55, 0.6),
                 border_width=max(0.8, 1.0 * scale),
             )
-            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
+            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=(8 if tid == 'SKETCH' else 11) * scale, color=(0.88, 0.92, 0.98, 1.0))
         else:
-            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=11 * scale, color=(0.60, 0.66, 0.75, 1.0))
+            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=(8 if tid == 'SKETCH' else 11) * scale, color=(0.60, 0.66, 0.75, 1.0))
 
     # ── 3. Middle Bar: Prompt Field & Main Action Button ──────────────────────
     mid_y = hud_y + 45.0 * scale
@@ -891,6 +891,8 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 if not is_inside(bounds.get('prompt')):
                     HUD_STATE['typing'] = False
                     target_area.tag_redraw()
+                    if not is_inside(total_bounds):
+                        return {'PASS_THROUGH'}
 
             elif event.type == 'ESC' and event.value == 'PRESS':
                 HUD_STATE['typing'] = False

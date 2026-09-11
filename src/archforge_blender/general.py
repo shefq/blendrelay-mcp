@@ -281,7 +281,41 @@ def inspect_scene(offset=0, limit=20, object_name=None, names=None):
                 objects=[_object_summary(o) for o in filtered[offset:offset + limit]])
 
 
-# ── Execute functions ─────────────────────────────────────────────────────────
+def restore_viewport_state():
+    """Ensure viewport overlays remain enabled, mode is OBJECT, and objects are selectable."""
+    try:
+        # Return to Object Mode if left in Edit/Sculpt/Paint mode
+        if hasattr(bpy.context, 'mode') and bpy.context.mode != 'OBJECT':
+            if hasattr(bpy.ops.object, 'mode_set') and bpy.ops.object.mode_set.poll():
+                bpy.ops.object.mode_set(mode='OBJECT')
+    except Exception:
+        pass
+
+    try:
+        # Ensure Viewport Overlays and Selection Highlighting are active across all 3D viewports
+        wm = getattr(bpy.context, 'window_manager', None)
+        if wm:
+            for win in wm.windows:
+                for area in win.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        for space in area.spaces:
+                            if space.type == 'VIEW_3D':
+                                if not space.overlay.show_overlays:
+                                    space.overlay.show_overlays = True
+                                if not space.overlay.show_outline_selected:
+                                    space.overlay.show_outline_selected = True
+                        area.tag_redraw()
+    except Exception:
+        pass
+
+    try:
+        # Ensure objects in the scene are not locked from selection
+        for obj in bpy.data.objects:
+            if getattr(obj, 'hide_select', False):
+                obj.hide_select = False
+    except Exception:
+        pass
+
 
 def execute_code(code, label='Prompt edit'):
     """Execute Python WITHOUT checkpointing — fast path like blender-mcp.
@@ -307,6 +341,8 @@ def execute_code(code, label='Prompt edit'):
         return {'executed': True, 'result': value, 'output': buf.getvalue()[-10000:]}
     except Exception:
         return {'executed': False, 'error': traceback.format_exc()[-8000:]}
+    finally:
+        restore_viewport_state()
 
 
 def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
@@ -348,6 +384,8 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
         if before:
             res['before'] = before
         return res
+    finally:
+        restore_viewport_state()
 
 
 # ── Viewport capture ──────────────────────────────────────────────────────────
@@ -474,6 +512,7 @@ def screenshot(root, context=None):
     finally:
         (r.filepath, r.resolution_x, r.resolution_y,
          r.resolution_percentage, r.image_settings.file_format) = old
+        restore_viewport_state()
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
