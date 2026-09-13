@@ -11,12 +11,14 @@ from .store import Store
 
 
 from .bridge import Bridge
+from .asset_service import AssetService
 
 
-class Service(Bridge):
+class Service(Bridge, AssetService):
     def __init__(self,root,source_roots=()):
         self.store=Store(root);self.lock=threading.RLock();self.sessions={};self.source_roots=[Path(p).resolve() for p in source_roots]
         self.bridge_init()
+        self.assets_init()
         # Uncommitted staging cannot be trusted after a runtime crash.
         for op in self.store.pending():
             op['status']='failed' if op['status']=='staging' else 'recovery_required'
@@ -30,9 +32,10 @@ class Service(Bridge):
             if fn is None:raise DomainError('UNKNOWN_METHOD',method)
             try:return fn(**p)
             except TypeError as e:raise DomainError('INVALID_ARGUMENTS',str(e))
+            except ValueError as e:raise DomainError('ASSET_POLICY' if method.startswith('assets.') else 'INVALID_ARGUMENTS',str(e))
 
     def rpc_capabilities(self):
-        return {'product':'ArchForge MCP','version':'0.2.1','protocol_version':1,'schema_version':'1.0.0',
+        return {'product':'ArchForge MCP','version':'0.2.4','protocol_version':1,'schema_version':'1.0.0',
             'legacy_template_operations':OPERATIONS,'legacy_asset_families':['table','chair','bed','cabinet','shelf'],
             'general_blender':{'enabled':True,'python_execution':True,'full_scene_versions':True,'architectural_schema_required':False},
             'legacy_template_limits':{'storeys':1,'wall_geometry':'orthogonal','roof_families':['flat','gable','none']},

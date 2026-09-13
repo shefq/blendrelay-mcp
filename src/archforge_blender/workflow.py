@@ -20,7 +20,7 @@ def compact(value):
     return value
 
 
-def instructions(mode, instance, mesh, visual, only_selected):
+def instructions(mode, instance, mesh, visual, only_selected, max_mcp_calls=6, max_edit_attempts=1, max_job_polls=1):
     return f'''Operate on the current Blender scene using ArchForge. instance_id={instance}.
 Workflow: {mode}. Current scene context supersedes previous assumptions.
 {'Work in coherent construction stages for large builds; inspect scene layout and validate each meaningful stage as needed.' if mode == 'BUILD' else 'Keep this request focused on the selected change; expand inspection only to resolve a specific uncertainty.'}
@@ -28,7 +28,18 @@ Use supplied selection data first. Inspect named targets once only if needed; in
 adjacent geometry where necessary to preserve connections. Do not enumerate the whole
 scene for a selected edit. Do not search old prompts, logs, addon code or run environment
 diagnostics during modeling. Read attached reference images when relevant.
-Aim for inspection, edit, verification; this is a soft target, not a hard call limit.
+For external assets use get_asset_policy, search_assets and import_asset only; never
+change provider settings or download assets through Python, shell or other providers.
+Search cache first. Prefer Poly Haven for realistic materials/HDRIs/environment and
+Poly Pizza for lightweight props. Respect licence and size limits; use procedural
+geometry if no permitted asset fits. Poll asset_job only while queued/running.
+MCP CALL BUDGET: use no more than {max_mcp_calls} total ArchForge MCP tool calls for
+this request, including job-status polls and asset operations. Plan before calling tools.
+EDIT ATTEMPTS: perform no more than {max_edit_attempts} edit attempt(s). Make one
+coherent operation per attempt; do not split a simple change into many micro-edits.
+JOB POLLS: use no more than {max_job_polls} status poll(s) for an operation, and only
+when its immediately returned status is queued or running. A completed response needs
+no poll. If a budget would be exceeded, stop and report the remaining uncertainty.
 Use archforge_blender_command with action and arguments as an object. It waits briefly;
 when status is complete, consume the result and continue. Poll only queued/running jobs.
 Never keep polling a terminal job or resubmit a timed-out edit with a new ID.

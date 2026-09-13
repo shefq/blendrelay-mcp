@@ -522,6 +522,9 @@ def screenshot(root, context=None, max_dimension=512):
 def run(root, job):
     action = job['action']
     args = job.get('arguments', {})
+    if action == 'asset_import':
+        from .asset_import import import_cached
+        return import_cached(root, **args)
     if action == 'inspect':
         return inspect_scene(**args)
     if action == 'get_scene_info':

@@ -24,6 +24,7 @@ class ProtocolTests(unittest.TestCase):
         names={t['name'] for t in result['tools']}
         self.assertIn('archforge_blender_command',names)
         self.assertIn('archforge_blender_sessions',names)
+        self.assertTrue({'get_asset_policy','search_assets','import_asset','list_cached_assets','refresh_asset_cache','asset_job'} <= names)
         self.assertNotIn('archforge_create_house',names)
         command=next(t for t in result['tools'] if t['name']=='archforge_blender_command')
         self.assertFalse(command['annotations']['destructiveHint'])

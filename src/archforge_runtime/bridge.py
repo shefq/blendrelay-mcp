@@ -35,11 +35,12 @@ class Bridge:
         return [dict(instance_id=k, **{f:v for f,v in s.items() if f != 'seen'})
                 for k,s in self.blender_sessions.items() if time.monotonic()-s['seen'] < 30]
 
-    def rpc_blender_poll(self, instance_id, scene_name='', filepath='', selection=None, version='0.2.1'):
+    def rpc_blender_poll(self, instance_id, scene_name='', filepath='', selection=None, version='0.2.4', asset_policy=None, asset_scene=None):
         if not isinstance(instance_id, str) or not instance_id:
             raise DomainError('INVALID_INSTANCE', 'Instance ID is required')
         self.blender_sessions[instance_id] = dict(seen=time.monotonic(), scene_name=scene_name,
-                                                 filepath=filepath, selection=selection or [], version=version)
+                                                 filepath=filepath, selection=selection or [], version=version,
+                                                 asset_policy=asset_policy, asset_scene=asset_scene)
         # A dispatched job is never automatically executed twice.
         for path in sorted(self.bridge_dir.glob('*.json'), key=lambda p:p.stat().st_mtime_ns):
             job=json.loads(path.read_text())

@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "archforge_mcp"
-version = "0.2.3"
+version = "0.2.4"
 name = "ArchForge MCP"
 tagline = "Create any Blender content with MCP and scene versions"
 maintainer = "ArchForge MCP contributors"

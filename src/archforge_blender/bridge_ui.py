@@ -15,7 +15,8 @@ from mathutils import Vector
 from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, FloatProperty, CollectionProperty
 from .client import Connection,default_root
 from . import edit_context, workflow, run_metrics, conversation
-from . import general, sketch, viewport_hud
+from . import general, sketch, viewport_hud, target_region
+from . import asset_ui
 
 STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
            codex_process=None,codex_output=None,codex_log=None,codex_started=0,
@@ -318,6 +319,7 @@ def ensure_connected(context=None):
             scene_name=bpy.context.scene.name,
             filepath=bpy.data.filepath,
             selection=[o.name for o in bpy.context.selected_objects],
+            **asset_ui.poll_fields(bpy.context.scene),
         ), received)
         conn.tick()
         STATE['status'] = 'Connected · general Blender mode'
@@ -470,7 +472,7 @@ def run_agent_reader(process, log_path, agent_name, final_path, conversation_pat
                 pass
 
 
-def start_agent(context, prompt_override=None):
+def start_agent(context, prompt_override=None, use_region=False):
     active_proc = STATE.get('agent_process') or STATE.get('codex_process')
     if active_proc and active_proc.poll() is None:
         agent_name = 'Antigravity' if STATE.get('agent_backend') == 'ANTIGRAVITY' else 'Codex'
@@ -525,16 +527,31 @@ def start_agent(context, prompt_override=None):
         except Exception as error:
             sketch_viewport = 'Capture unavailable: ' + str(error)
 
+    # 3D Target Region handling
+    region_data = None
+    if use_region:
+        region_data = target_region.payload(context)
+        if not region_data:
+            raise RuntimeError('No target box found. Click "Draw Target Box" first.')
+    elif target_region.box(context.scene):
+        try:
+            region_data = target_region.payload(context)
+        except Exception:
+            region_data = None
+
     run_id = f'{agent.lower()}-' + uuid.uuid4().hex
     log_path, final_path = agent_paths(root, run_id)
-    only_selected = getattr(context.scene, 'archforge_only_selected', False)
+    only_selected = getattr(context.scene, 'archforge_only_selected', False) and not use_region
     auto_verify = getattr(context.scene, 'archforge_auto_verify', True)
+    max_mcp_calls = getattr(context.scene, 'archforge_max_mcp_calls', 6)
+    max_edit_attempts = getattr(context.scene, 'archforge_max_edit_attempts', 1)
+    max_job_polls = getattr(context.scene, 'archforge_max_job_polls', 1)
     if only_selected and not context.selected_objects:
         raise RuntimeError('No objects selected. Select at least one object in the 3D Viewport or disable "Only selected objects".')
 
-    selected_objs = selection_context(context) if (mesh_edit or context.scene.archforge_include_selection or only_selected) else []
+    selected_objs = selection_context(context) if (mesh_edit or only_selected) else []
     selection_view_paths = []
-    if context.selected_objects and not mesh_edit:
+    if context.selected_objects and not mesh_edit and only_selected:
         try:
             selection_view_paths = capture_selection_views(root, run_id, context.selected_objects, angles=(35.0,) if workflow.choose(context.scene.archforge_task_mode, prompt, True) == 'EDIT' else (35.0,155.0,275.0))
         except Exception as error:
@@ -560,6 +577,7 @@ def start_agent(context, prompt_override=None):
         'selected_object_view_images': selection_view_paths,
         'viewport_sketch': sketch_data,
         'sketch_viewport_image': sketch_viewport,
+        'target_region': region_data,
         'reference_images': reference_image_paths,
         'archforge_instance_id': STATE['instance'],
         'agent': agent,
@@ -571,7 +589,12 @@ def start_agent(context, prompt_override=None):
     task_mode = workflow.choose(context.scene.archforge_task_mode, prompt, bool(context.selected_objects))
     verification = context.scene.archforge_verification
     visual = verification == 'VISUAL' or (verification == 'AUTO' and auto_verify)
-    system_instructions = workflow.instructions(task_mode, STATE['instance'], bool(mesh_edit), visual, only_selected)
+    system_instructions = workflow.instructions(
+        task_mode, STATE['instance'], bool(mesh_edit), visual, only_selected,
+        max_mcp_calls, max_edit_attempts, max_job_polls,
+    )
+    if region_data and use_region:
+        system_instructions += '\n' + target_region.PROMPT_RULES
 
     # Compact context JSON (trim large arrays to avoid hitting CLI arg limits)
     compact_ctx = {
@@ -587,7 +610,19 @@ def start_agent(context, prompt_override=None):
         'sketch_stroke_count': context_text['viewport_sketch'].get('stroke_count', 0),
         'sketch_hit_objects': context_text['viewport_sketch'].get('hit_objects', [])[:10],
         'sketch_viewport_image': context_text['sketch_viewport_image'],
+        'target_region': ({
+            'guide_object': region_data.get('guide_object'),
+            'center': [round(v, 3) for v in region_data.get('center', [])],
+            'dimensions': [round(v, 3) for v in region_data.get('dimensions', [])],
+            'overlapping_bounds': [
+                {'name': item.get('name'), 'type': item.get('type')}
+                for item in region_data.get('overlapping_bounds', [])[:10]
+            ],
+        } if region_data else None),
         'reference_images': context_text['reference_images'],
+        'mcp_call_budget': max_mcp_calls,
+        'max_edit_attempts': max_edit_attempts,
+        'max_job_polls': max_job_polls,
     }
     compact_ctx = workflow.compact(compact_ctx)
     context_snippet = json.dumps(compact_ctx, ensure_ascii=False, separators=(',', ':'))
@@ -687,14 +722,13 @@ def start_agent(context, prompt_override=None):
     if only_selected:
         selected_names = [o.name for o in context.selected_objects[:10]]
         print(f"[ArchForge] 🎯 Restricted Scope: ONLY selected objects ({len(context.selected_objects)}): {', '.join(selected_names)}", flush=True)
-    elif context.scene.archforge_include_selection:
-        selected_names = [o.name for o in context.selected_objects[:10]]
-        if selected_names:
-            print(f"[ArchForge] Selected objects ({len(context.selected_objects)}): {', '.join(selected_names)}", flush=True)
+    if region_data:
+        print(f"[ArchForge] 📦 Target Region: bounds {region_data.get('dimensions')} centered at {region_data.get('center')}", flush=True)
     if sketch_viewport:
         print(f"[ArchForge] Viewport sketch attached: {sketch_viewport}", flush=True)
     if selection_view_paths:
         print(f"[ArchForge] Attached {len(selection_view_paths)} selected-object reference views", flush=True)
+    print(f"[ArchForge] MCP controls: {max_mcp_calls} calls · {max_edit_attempts} edit attempt(s) · {max_job_polls} job poll(s)", flush=True)
     print(f"[ArchForge] Log file: {log_path}", flush=True)
     print("=" * 60 + "\n", flush=True)
 
@@ -848,7 +882,7 @@ def timer():
             elif not c.pending and time.monotonic()-STATE['last_poll']>.35:
                 STATE['last_poll']=time.monotonic()
                 c.request('blender.poll',dict(instance_id=STATE['instance'],scene_name=bpy.context.scene.name,
-                          filepath=bpy.data.filepath,selection=[o.name for o in bpy.context.selected_objects]),received)
+                          filepath=bpy.data.filepath,selection=[o.name for o in bpy.context.selected_objects],**asset_ui.poll_fields(bpy.context.scene)),received)
         except Exception as e:
             c.close();STATE['connection']=None;STATE['status']=str(e);redraw()
     else:
@@ -1250,7 +1284,7 @@ class AF_PT_Main(bpy.types.Panel):
             icon='WINDOW',
             depress=getattr(scene, 'archforge_show_viewport_hud', False),
         )
-        header_row.label(text='v0.2.3')
+        header_row.label(text='v0.2.5')
 
         conn_row = header_box.row(align=True)
         conn = STATE.get('connection')
@@ -1353,6 +1387,13 @@ class AF_PT_Main(bpy.types.Panel):
 
             layout.prop(scene, 'archforge_task_mode')
             layout.prop(scene, 'archforge_verification')
+            budget_box = layout.box()
+            budget_box.label(text='MCP Call Controls', icon='SETTINGS')
+            budget_box.prop(scene, 'archforge_max_mcp_calls')
+            budget_row = budget_box.row(align=True)
+            budget_row.prop(scene, 'archforge_max_edit_attempts')
+            budget_row.prop(scene, 'archforge_max_job_polls')
+            budget_box.label(text='Limits are applied to the next agent task.', icon='INFO')
             row = layout.row(align=True)
             row.prop(scene, 'archforge_continue_conversation')
             row.operator('archforge.new_conversation', text='New Conversation')
@@ -1380,9 +1421,6 @@ class AF_PT_Main(bpy.types.Panel):
                 sc_header.label(text=f'({num_sel} selected)')
 
             sc_row = scope_card.row(align=True)
-            include_row = sc_row.row(align=True)
-            include_row.enabled = context.mode != 'EDIT_MESH'
-            include_row.prop(scene, 'archforge_include_selection', text='Mesh context included' if context.mode == 'EDIT_MESH' else 'Include selection', toggle=True)
             sc_row.prop(scene, 'archforge_only_selected', text='Only selected geometry' if context.mode == 'EDIT_MESH' else 'Only selected objects', toggle=True)
 
             if getattr(scene, 'archforge_only_selected', False):
@@ -1427,6 +1465,9 @@ class AF_PT_Main(bpy.types.Panel):
             if STATE.get('sketch_viewport'):
                 vp_box = sketch_box.box()
                 vp_box.label(text='Snapshot: ' + Path(STATE['sketch_viewport']).name, icon='IMAGE_DATA')
+
+            layout.separator(factor=0.5)
+            target_region.draw(layout, context)
 
         # ── TAB: HISTORY (Checkpoints) ──────────────────────────────────────
         elif tab == 'HISTORY':
@@ -1504,6 +1545,7 @@ class AF_PT_Main(bpy.types.Panel):
 
 
 CLASSES = (
+    *target_region.CLASSES,
     AF_OT_NewConversation,
     AF_OT_Connect,
     AF_OT_Disconnect,
@@ -1532,6 +1574,7 @@ CLASSES = (
 
 
 def register():
+    asset_ui.register()
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.archforge_continue_conversation = BoolProperty(name='Continue conversation', description='Resume this workspace conversation with fresh scene context', default=False)
@@ -1544,7 +1587,27 @@ def register():
         description='After editing, automatically take a viewport render, verify against prompt, and execute fixes',
         default=True,
     )
-    bpy.types.Scene.archforge_include_selection = BoolProperty(name='Include selected objects', default=True)
+    bpy.types.Scene.archforge_max_mcp_calls = IntProperty(
+        name='Maximum MCP calls',
+        description='Hard call budget supplied to the agent for one task, including status polls and asset operations',
+        default=6,
+        min=1,
+        max=50,
+    )
+    bpy.types.Scene.archforge_max_edit_attempts = IntProperty(
+        name='Maximum edit attempts',
+        description='Maximum coherent Blender edit operations the agent may attempt in one task',
+        default=1,
+        min=1,
+        max=10,
+    )
+    bpy.types.Scene.archforge_max_job_polls = IntProperty(
+        name='Maximum job polls',
+        description='Maximum status polls per operation; complete results do not need polling',
+        default=1,
+        min=0,
+        max=10,
+    )
     bpy.types.Scene.archforge_only_selected = BoolProperty(
         name='Only selected objects',
         description='Restrict edits to selected objects, or selected mesh elements in Edit Mode',
@@ -1654,6 +1717,7 @@ def register():
 
 
 def unregister():
+    asset_ui.unregister()
     if bpy.app.timers.is_registered(timer):
         bpy.app.timers.unregister(timer)
     if STATE['connection']:
@@ -1670,6 +1734,9 @@ def unregister():
         'archforge_include_selection',
         'archforge_only_selected',
         'archforge_auto_verify',
+        'archforge_max_mcp_calls',
+        'archforge_max_edit_attempts',
+        'archforge_max_job_polls',
         'archforge_show_viewport_hud',
         'archforge_hud_width',
         'archforge_hud_scale',

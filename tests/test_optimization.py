@@ -5,7 +5,7 @@ from pathlib import Path
 from archforge_blender import conversation
 from archforge_mcp.job_results import wait_and_compact
 from archforge_mcp.server import handle
-from archforge_blender.workflow import compact, choose
+from archforge_blender.workflow import compact, choose, instructions
 from archforge_blender.run_metrics import Metrics
 
 
@@ -57,6 +57,12 @@ class OptimizationTests(unittest.TestCase):
         self.assertEqual(c['vertices'][0]['local'],[.123457])
         self.assertEqual(choose('AUTO','Bevel these edges',True),'EDIT')
         self.assertEqual(choose('AUTO','Build a house',True),'BUILD')
+
+    def test_workflow_instructions_include_call_controls(self):
+        text=instructions('EDIT','instance',False,False,True,4,1,0)
+        self.assertIn('no more than 4 total ArchForge MCP tool calls',text)
+        self.assertIn('no more than 1 edit attempt',text)
+        self.assertIn('no more than 0 status poll',text)
 
     def test_metrics_count_completed_once(self):
         m=Metrics()
