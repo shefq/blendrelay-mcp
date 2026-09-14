@@ -10,6 +10,7 @@ import bpy
 from bpy.props import BoolProperty, IntProperty, StringProperty, EnumProperty, CollectionProperty
 from .asset_rules import AssetPolicy
 from .client import Connection
+from . import workflow
 
 FIELDS=('poly_haven','poly_pizza','pizza_cc0','pizza_cc_by','max_download_mb')
 STATE={'connection':None,'job':None,'scene':None,'status':'Ready','last':0,'thumbnail_images':set()}
@@ -24,7 +25,21 @@ def policy(scene):
 
 
 def poll_fields(scene):
-    return dict(asset_policy=asdict(policy(scene)),asset_scene=scene_key(scene))
+    try:
+        from . import bridge_ui
+        run_id=bridge_ui.STATE.get('active_agent_run_id')
+    except Exception:
+        run_id=None
+    mode=getattr(scene,'archforge_resource_mode','FULL_BUILD')
+    quality=getattr(scene,'archforge_output_quality','HIGH')
+    limits=workflow.profile(mode,quality)
+    autonomous=getattr(scene,'archforge_permission_mode','AUTONOMOUS')=='AUTONOMOUS'
+    return dict(asset_policy=asdict(policy(scene)),asset_scene=scene_key(scene),
+                allow_python_execution=autonomous or bool(getattr(scene,'archforge_allow_python_execution',True)),
+                agent_run_id=run_id,
+                mcp_call_limit=limits['initial_calls'],edit_attempt_limit=limits['initial_edits'],
+                job_poll_limit=limits['polls_per_job'],max_mcp_calls=limits['max_calls'],
+                max_edit_attempts=limits['max_edits'],auto_extend=limits['auto_extend'])
 
 
 def redraw():

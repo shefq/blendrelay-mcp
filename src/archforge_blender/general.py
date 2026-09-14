@@ -11,7 +11,7 @@ import traceback
 import unicodedata
 import uuid
 import bpy
-from . import sketch, edit_context
+from . import sketch, edit_context, scene_helpers
 
 
 # ── Version / checkpoint helpers ─────────────────────────────────────────────
@@ -301,13 +301,30 @@ def restore_viewport_state():
         pass
 
     try:
-        # Ensure objects in the scene are not locked from selection
         for obj in bpy.data.objects:
-            if getattr(obj, 'hide_select', False):
-                obj.hide_select = False
+            if getattr(obj, 'hide_select', False):obj.hide_select=False
     except Exception:
         pass
 
+
+def _scene_snapshot():
+    return {'objects':set(bpy.data.objects.keys()),'materials':set(bpy.data.materials.keys()),
+            'collections':set(bpy.data.collections.keys())}
+
+
+def _scene_progress(before):
+    current=_scene_snapshot();points=[]
+    for obj in bpy.context.scene.objects:
+        try:points.extend(tuple(obj.matrix_world @ __import__('mathutils').Vector(corner)) for corner in obj.bound_box)
+        except Exception:pass
+    bounds=[0,0,0]
+    if points:
+        bounds=[round(max(p[i] for p in points)-min(p[i] for p in points),3) for i in range(3)]
+    return {'created_objects':sorted(current['objects']-before['objects'])[:200],
+            'created_object_count':len(current['objects']-before['objects']),
+            'created_materials':sorted(current['materials']-before['materials'])[:100],
+            'created_collection_count':len(current['collections']-before['collections']),
+            'scene_object_count':len(current['objects']),'scene_bounds':bounds}
 
 def execute_code(code, label='Prompt edit'):
     """Execute Python WITHOUT checkpointing — fast path like blender-mcp.
@@ -315,13 +332,14 @@ def execute_code(code, label='Prompt edit'):
     """
     if not isinstance(code, str):
         raise ValueError('code must be Python text')
+    before_state=_scene_snapshot()
     try:
         code = code.encode('latin-1').decode('utf-8')
     except (UnicodeDecodeError, UnicodeEncodeError):
         pass
     bpy_proxy, mathutils = _make_bpy_proxy()
     editing_state = edit_context.remember()
-    namespace = {'bpy': bpy_proxy, 'mathutils': mathutils, '__name__': '__archforge__'}
+    namespace = {'bpy': bpy_proxy, 'mathutils': mathutils, 'af': scene_helpers, '__name__': '__archforge__'}
     try:
         compiled = compile(code, '<ArchForge MCP>', 'exec')
         buf = io.StringIO()
@@ -331,9 +349,11 @@ def execute_code(code, label='Prompt edit'):
         value = json.loads(json.dumps(value, default=str))
         if len(json.dumps(value)) > 100000:
             value = {'truncated': True, 'text': str(value)[:100000]}
-        return {'executed': True, 'result': value, 'output': buf.getvalue()[-10000:]}
+        return {'executed': True, 'result': value, 'output': buf.getvalue()[-10000:],
+                'progress':_scene_progress(before_state)}
     except Exception:
-        return {'executed': False, 'error': traceback.format_exc()[-8000:]}
+        return {'executed': False, 'error': traceback.format_exc()[-8000:],
+                'progress':_scene_progress(before_state)}
     finally:
         try:
             edit_context.restore(editing_state)
@@ -356,7 +376,8 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
         pass
     bpy_proxy, mathutils = _make_bpy_proxy()
     editing_state = edit_context.remember()
-    namespace = {'bpy': bpy_proxy, 'mathutils': mathutils, '__name__': '__archforge__'}
+    namespace = {'bpy': bpy_proxy, 'mathutils': mathutils, 'af': scene_helpers, '__name__': '__archforge__'}
+    before_state=_scene_snapshot()
     should_checkpoint = bool(save_checkpoint or kwargs.get('checkpoint', False))
     before = checkpoint(root, 'Before: ' + label) if should_checkpoint else None
     output = io.StringIO()
@@ -369,7 +390,7 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
         value = json.loads(json.dumps(value, default=str))
         if len(json.dumps(value)) > 100000:
             value = {'truncated': True, 'text': str(value)[:100000]}
-        res = dict(output=output.getvalue()[-100000:], result=value)
+        res = dict(output=output.getvalue()[-100000:], result=value,progress=_scene_progress(before_state))
         if before:
             res['before'] = before
         if after:
@@ -378,6 +399,7 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
     except Exception:
         res = dict(failed=True, error=traceback.format_exc()[-12000:],
                     output=output.getvalue()[-100000:],
+                    progress=_scene_progress(before_state),
                     recovery='Fix the error in your script and continue. Do NOT restore the scene unless specifically instructed by the user.')
         if before:
             res['before'] = before
@@ -388,6 +410,36 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
         except Exception as error:
             print("ArchForge could not restore editing mode:", error)
         restore_viewport_state()
+
+
+def build_batch(operations, label='Scene batch'):
+    """Execute common creation operations without requiring generated boilerplate."""
+    if not isinstance(operations,list) or not operations:raise ValueError('operations must be a non-empty list')
+    created=[];materials=[]
+    for index,operation in enumerate(operations):
+        if not isinstance(operation,dict):raise ValueError(f'operation {index} must be an object')
+        kind=operation.get('type');name=operation.get('name',f'ArchForge {index+1}')
+        target=scene_helpers.collection(operation['collection']) if operation.get('collection') else None
+        if kind=='collection':obj=scene_helpers.collection(name)
+        elif kind=='material':
+            obj=scene_helpers.material(name,operation.get('color',(.8,.8,.8,1)),operation.get('metallic',0),operation.get('roughness',.5));materials.append(obj.name)
+        elif kind=='cube':
+            mat=bpy.data.materials.get(operation.get('material',''))
+            obj=scene_helpers.cube(name,operation.get('location',(0,0,0)),operation.get('dimensions',(1,1,1)),mat,target,operation.get('bevel',0))
+        elif kind=='cylinder':
+            mat=bpy.data.materials.get(operation.get('material',''))
+            obj=scene_helpers.cylinder(name,operation.get('location',(0,0,0)),operation.get('radius',1),operation.get('depth',2),operation.get('vertices',32),mat,target)
+        elif kind=='area_light':obj=scene_helpers.area_light(name,operation.get('location',(0,0,5)),operation.get('energy',1000),operation.get('size',5),operation.get('color',(1,1,1)),operation.get('rotation',(0,0,0)))
+        elif kind=='camera':obj=scene_helpers.camera(name,operation.get('location',(10,-10,8)),operation.get('target',(0,0,0)),operation.get('lens',45))
+        elif kind=='world':obj=scene_helpers.world(operation.get('color',(.05,.05,.05,1)),operation.get('strength',.5))
+        elif kind=='assign_material':
+            obj=bpy.data.objects.get(operation.get('object',''));mat=bpy.data.materials.get(operation.get('material',''))
+            if not obj or not mat:raise ValueError(f'operation {index}: object and material must exist')
+            scene_helpers.assign(obj,mat)
+        else:raise ValueError(f'operation {index}: unsupported type {kind!r}')
+        if hasattr(obj,'name') and kind not in ('material','world'):created.append(obj.name)
+    restore_viewport_state()
+    return {'executed':True,'label':label,'operations':len(operations),'created':created,'materials':materials}
 
 
 # ── Viewport capture ──────────────────────────────────────────────────────────
@@ -535,6 +587,8 @@ def run(root, job):
         return execute(root, **args)
     if action == 'execute_code':
         return execute_code(**args)
+    if action == 'build_batch':
+        return build_batch(**args)
     if action == 'versions':
         return versions(root)
     if action == 'checkpoint':
@@ -543,7 +597,61 @@ def run(root, job):
         return restore(root, **args)
     if action == 'screenshot':
         return screenshot(root, **args)
+    if action == 'capture_focused_view':
+        from . import focused_view
+        return focused_view.capture(root, **args)
+    if action == 'clear_data':
+        return clear_stored_data(root, **args)
     if action in ('mesh_edit', 'validate_selection'):
         from . import mesh_tools
         return mesh_tools.edit(**args) if action == 'mesh_edit' else mesh_tools.validate(**args)
     raise ValueError('Unknown Blender action: ' + action)
+
+
+def clear_stored_data(root, include_assets=False):
+    """Clean all stored operational data, checkpoints, logs, and jobs from the runtime directory."""
+    root_path = Path(root).resolve()
+    if not root_path.exists():
+        return {'cleared': True, 'root': str(root_path)}
+
+    subdirs = ['blender_jobs', 'agent_runs', 'scene_versions', 'conversations', 'restored_scenes', 'focused_views', 'selection_views']
+    if include_assets:
+        subdirs.append('assets')
+
+    for name in subdirs:
+        target = root_path / name
+        if target.is_dir():
+            try:
+                shutil.rmtree(target, ignore_errors=True)
+                target.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
+    for audit_name in ('audit.jsonl', 'audit.previous.jsonl'):
+        audit = root_path / audit_name
+        try:
+            if audit.exists():
+                with audit.open('w', encoding='utf-8') as f:
+                    f.truncate(0)
+        except OSError:
+            pass
+
+    for sketch_file in root_path.glob('sketch_viewport.*'):
+        try:
+            sketch_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    db_path = root_path / 'projects.sqlite3'
+    if db_path.exists():
+        try:
+            import sqlite3
+            con = sqlite3.connect(db_path, timeout=1.0)
+            con.executescript('DELETE FROM revisions; DELETE FROM plans; DELETE FROM operations; VACUUM;')
+            con.commit()
+            con.close()
+        except Exception:
+            pass
+
+    return {'cleared': True, 'root': str(root_path)}
+

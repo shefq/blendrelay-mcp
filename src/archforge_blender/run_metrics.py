@@ -42,7 +42,7 @@ class Metrics:
             except ValueError:action={}
         act=action.get('action','') if isinstance(action,dict) else ''
         stage=('verification' if act in {'validate_selection','screenshot'} else
-               'editing' if act in {'execute','execute_code','mesh_edit'} else
+               'editing' if act in {'execute','execute_code','build_batch','mesh_edit'} else
                'waiting' if 'job' in str(name) or 'job' in str(params.get('ToolName','') if isinstance(params,dict) else '') else
                'inspection' if act in {'inspect','get_scene_info','get_object_info'} else 'other')
         self.last_stage=stage

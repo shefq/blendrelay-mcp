@@ -3,11 +3,26 @@ import json
 import os
 import secrets
 import socketserver
+import subprocess
 import sys
 from pathlib import Path
 from archforge_domain.model import DomainError
 from .protocol import data_dir, frame, receive, Client
 from .service import Service
+
+
+def secure_private(path):
+    """Restrict runtime secrets to the current Windows account where possible."""
+    path=Path(path);os.chmod(path,0o600)
+    if os.name!='nt':return
+    user=os.environ.get('USERNAME')
+    domain=os.environ.get('USERDOMAIN')
+    identity=(domain+'\\'+user) if domain and user else user
+    if not identity:return
+    result=subprocess.run(['icacls',str(path),'/inheritance:r','/grant:r',identity+':(F)'],
+                          capture_output=True,text=True,timeout=10,
+                          creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    if result.returncode:raise OSError('Could not protect runtime credentials with Windows ACLs')
 
 
 def serve(root,source_roots=()):
@@ -24,6 +39,8 @@ def serve(root,source_roots=()):
     except OSError:
         lockfile.close();raise SystemExit('An ArchForge runtime already owns this data directory')
     service=Service(root,source_roots);token=secrets.token_urlsafe(32)
+    if not service.audit_path.exists():service.audit_path.touch()
+    secure_private(service.audit_path)
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             self.request.settimeout(35)
@@ -48,7 +65,7 @@ def serve(root,source_roots=()):
         allow_reuse_address=False
     server=Server(('127.0.0.1',0),Handler)
     connection={'product':'ArchForge MCP','protocol_version':1,'port':server.server_address[1],'token':token,'pid':os.getpid()}
-    temp=root/'connection.tmp';temp.write_text(json.dumps(connection));os.chmod(temp,0o600);temp.replace(root/'connection.json')
+    temp=root/'connection.tmp';temp.write_text(json.dumps(connection));secure_private(temp);temp.replace(root/'connection.json')
     print(f'ArchForge MCP runtime ready on loopback port {server.server_address[1]}',file=sys.stderr,flush=True)
     try:server.serve_forever(poll_interval=.25)
     except KeyboardInterrupt:pass

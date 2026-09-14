@@ -7,6 +7,7 @@ import time
 from urllib.parse import quote, urlsplit, unquote
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 from archforge_blender.asset_rules import AssetError
+from archforge_blender.version import VERSION
 
 HOSTS = {'poly_haven': {'api.polyhaven.com', 'cdn.polyhaven.com', 'dl.polyhaven.org'},
          'poly_pizza': {'poly.pizza', 'static.poly.pizza'}}
@@ -36,7 +37,7 @@ class PublicTransport:
             with self._gate:
                 time.sleep(max(0, 10 - (time.monotonic() - self._pizza_last)))
                 self._pizza_last = time.monotonic()
-        return build_opener(NoRedirect).open(Request(url, headers={'User-Agent': 'ArchForge-AssetLibrary/0.2.4', 'Accept-Encoding': 'identity'}), timeout=20)
+        return build_opener(NoRedirect).open(Request(url, headers={'User-Agent': f'ArchForge-AssetLibrary/{VERSION}', 'Accept-Encoding': 'identity'}), timeout=20)
 
     def text(self, provider, url):
         with self.open(provider, url) as response:

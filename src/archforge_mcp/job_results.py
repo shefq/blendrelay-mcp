@@ -15,7 +15,9 @@ def wait_and_compact(client, method, arguments):
     job = client.call(method, args)
     deadline = time.monotonic() + wait
     while job.get('status') in {'queued', 'running'} and time.monotonic() < deadline:
-        time.sleep(min(.2, max(0, deadline-time.monotonic())))
+        # A moderate cadence keeps long Blender operations below the runtime's
+        # abuse guard while still returning short edits promptly.
+        time.sleep(min(.5, max(0, deadline-time.monotonic())))
         job = client.call('blender.job', {'operation_id': job['operation_id'], 'instance_id': job.get('instance_id')})
     compact = {k: job[k] for k in ('operation_id', 'instance_id', 'action', 'status', 'error', 'result') if k in job}
     failed = isinstance(compact.get('result'), dict) and (compact['result'].get('failed') or compact['result'].get('executed') is False)

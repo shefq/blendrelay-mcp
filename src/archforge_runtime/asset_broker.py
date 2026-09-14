@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from archforge_blender.asset_rules import AssetError
 from .asset_providers import PublicTransport, PolyHaven, PolyPizza, identifier
 from urllib.parse import urlsplit
@@ -119,17 +120,21 @@ class AssetBroker:
         messages=[]
         if not policy.poly_haven and not policy.poly_pizza: return dict(results=[],messages=[OFFLINE],fallback='procedural')
         order = ['poly_pizza','poly_haven'] if style and any(w in style.lower() for w in ('low','stylized','lightweight')) else ['poly_haven','poly_pizza']
+        enabled=[name for name in order if (not provider or name==provider) and getattr(policy_getter(),name)]
+        found={}
+        with ThreadPoolExecutor(max_workers=max(1,len(enabled)),thread_name_prefix='ArchForge-provider') as pool:
+            futures={pool.submit(self.providers[name].search,query,50):name for name in enabled}
+            for future in as_completed(futures):
+                name=futures[future]
+                try:found[name]=future.result()
+                except Exception as error:messages.append(f'{name}: {error}')
         for name in order:
-            if provider and name!=provider: continue
-            if not getattr(policy_getter(),name): continue
-            try:
-                for record in self.providers[name].search(query,50):
-                    try: policy_getter().check(record)
-                    except AssetError: continue
-                    rows.append(record)
-                    if len(rows)>=max_results: break
-            except Exception as error: messages.append(f'{name}: {error}')
-            if len(rows)>=max_results: break
+            for record in found.get(name,[]):
+                try:policy_getter().check(record)
+                except AssetError:continue
+                rows.append(record)
+                if len(rows)>=max_results:break
+            if len(rows)>=max_results:break
         for record in rows[:min(max_results,12)]:
             thumbnail=self.cache_thumbnail(record,policy_getter)
             if thumbnail: record['thumbnail_path']=str(thumbnail)

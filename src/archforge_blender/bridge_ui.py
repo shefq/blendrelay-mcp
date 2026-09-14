@@ -14,13 +14,15 @@ import bpy
 from mathutils import Vector
 from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, FloatProperty, CollectionProperty
 from .client import Connection,default_root
-from . import edit_context, workflow, run_metrics, conversation
+from . import edit_context, workflow, run_metrics, conversation, agent_permissions
 from . import general, sketch, viewport_hud, target_region
 from . import asset_ui
 
 STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
            codex_process=None,codex_output=None,codex_log=None,codex_started=0,
-           agent_process=None,agent_output=None,agent_log=None,agent_backend='ANTIGRAVITY',agent_model='',agent_started=0)
+           agent_process=None,agent_output=None,agent_log=None,agent_backend='ANTIGRAVITY',agent_model='',agent_started=0,
+           active_agent_run_id=None,agent_job_errors=[],agent_expected_edit=False,agent_successful_edits=0,
+           agent_verify_after=False,agent_is_verification=False,agent_original_request='')
 
 
 def redraw():
@@ -228,7 +230,7 @@ def add_reference_images(context, paths):
     return added, combined
 
 
-def capture_selection_views(root, run_id, selected_objects, angles=(35.0, 155.0, 275.0)):
+def capture_selection_views(root, run_id, selected_objects, angles=(35.0, 155.0, 275.0), max_dimension=384):
     """Render three lightweight overview images framing the complete selection."""
     objects = [obj for obj in selected_objects if obj and obj.name in bpy.context.scene.objects]
     if not objects:
@@ -266,8 +268,8 @@ def capture_selection_views(root, run_id, selected_objects, angles=(35.0, 155.0,
     try:
         scene.camera = camera
         render.engine = 'BLENDER_WORKBENCH'
-        render.resolution_x = 384
-        render.resolution_y = 288
+        render.resolution_x = max(256,min(1024,int(max_dimension)))
+        render.resolution_y = round(render.resolution_x*.75)
         render.resolution_percentage = 100
         render.image_settings.file_format = 'JPEG'
         render.image_settings.quality = 70
@@ -472,7 +474,7 @@ def run_agent_reader(process, log_path, agent_name, final_path, conversation_pat
                 pass
 
 
-def start_agent(context, prompt_override=None, use_region=False):
+def start_agent(context, prompt_override=None, use_region=False, verification_pass=False):
     active_proc = STATE.get('agent_process') or STATE.get('codex_process')
     if active_proc and active_proc.poll() is None:
         agent_name = 'Antigravity' if STATE.get('agent_backend') == 'ANTIGRAVITY' else 'Codex'
@@ -482,6 +484,7 @@ def start_agent(context, prompt_override=None, use_region=False):
     agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
     if not prompt:
         raise RuntimeError(f'Enter a prompt for {agent_name}')
+    autonomous = getattr(context.scene, 'archforge_permission_mode', 'AUTONOMOUS') == 'AUTONOMOUS'
 
     mesh_edit = edit_context.capture(context)
     if mesh_edit and not mesh_edit['selected_count']:
@@ -505,6 +508,17 @@ def start_agent(context, prompt_override=None, use_region=False):
             raise RuntimeError(
                 f'Antigravity CLI (agy.exe) not found at: {executable}. '
                 'Please install it via: irm https://antigravity.google/cli/install.ps1 | iex'
+            )
+        broad_permission = autonomous or getattr(context.scene, 'archforge_unattended_agent_permissions', True)
+        narrow_permission = autonomous or getattr(context.scene, 'archforge_allow_antigravity_mcp', True)
+        if narrow_permission:
+            changed, settings_path = agent_permissions.ensure_antigravity_mcp_permission()
+            if changed:
+                print(f'[ArchForge] Added narrow Antigravity permission: {agent_permissions.ARCHFORGE_MCP_RULE} in {settings_path}', flush=True)
+        elif not broad_permission and not agent_permissions.antigravity_mcp_is_allowed():
+            raise RuntimeError(
+                'Antigravity headless prompts need MCP approval. Enable “Allow ArchForge MCP tools” '
+                'in MCP Call Controls; it grants only mcp(archforge/*).'
             )
         model = selected_model(context.scene, agent)
     else:
@@ -543,9 +557,10 @@ def start_agent(context, prompt_override=None, use_region=False):
     log_path, final_path = agent_paths(root, run_id)
     only_selected = getattr(context.scene, 'archforge_only_selected', False) and not use_region
     auto_verify = getattr(context.scene, 'archforge_auto_verify', True)
-    max_mcp_calls = getattr(context.scene, 'archforge_max_mcp_calls', 6)
-    max_edit_attempts = getattr(context.scene, 'archforge_max_edit_attempts', 1)
-    max_job_polls = getattr(context.scene, 'archforge_max_job_polls', 1)
+    resource_mode = getattr(context.scene, 'archforge_resource_mode', 'FULL_BUILD')
+    output_quality = getattr(context.scene, 'archforge_output_quality', 'HIGH')
+    resource_profile = workflow.profile(resource_mode, output_quality)
+    max_mcp_calls, max_edit_attempts, max_job_polls = workflow.resource_limits(resource_mode, output_quality)
     if only_selected and not context.selected_objects:
         raise RuntimeError('No objects selected. Select at least one object in the 3D Viewport or disable "Only selected objects".')
 
@@ -591,7 +606,8 @@ def start_agent(context, prompt_override=None, use_region=False):
     visual = verification == 'VISUAL' or (verification == 'AUTO' and auto_verify)
     system_instructions = workflow.instructions(
         task_mode, STATE['instance'], bool(mesh_edit), visual, only_selected,
-        max_mcp_calls, max_edit_attempts, max_job_polls,
+        max_mcp_calls, max_edit_attempts, max_job_polls, resource_mode, output_quality,
+        resource_profile['verification_passes'], autonomous,
     )
     if region_data and use_region:
         system_instructions += '\n' + target_region.PROMPT_RULES
@@ -623,6 +639,10 @@ def start_agent(context, prompt_override=None, use_region=False):
         'mcp_call_budget': max_mcp_calls,
         'max_edit_attempts': max_edit_attempts,
         'max_job_polls': max_job_polls,
+        'workload': resource_mode,
+        'output_quality': output_quality,
+        'adaptive_max_calls': resource_profile['max_calls'],
+        'adaptive_max_edits': resource_profile['max_edits'],
     }
     compact_ctx = workflow.compact(compact_ctx)
     context_snippet = json.dumps(compact_ctx, ensure_ascii=False, separators=(',', ':'))
@@ -687,7 +707,7 @@ def start_agent(context, prompt_override=None, use_region=False):
             # (no inline prompt arg needed — avoids Windows 32KB CLI arg limit).
             args = [
                 str(executable),
-                '--dangerously-skip-permissions',
+                *(['--dangerously-skip-permissions'] if (broad_permission or getattr(context.scene,'archforge_unattended_agent_permissions',True)) else []),
                 *( ['--model', model] if model else [] ),
                 '--input-format', 'text',
                 *(['--conversation', resume_id] if resume_id else []),
@@ -703,7 +723,7 @@ def start_agent(context, prompt_override=None, use_region=False):
         image_paths = reference_vision_paths + selection_view_paths
         args = [
             str(executable),
-            'exec', '--sandbox', 'workspace-write', '--cd', str(workdir),
+            'exec', *agent_permissions.codex_automatic_review_args(), '--cd', str(workdir),
             *(['resume', resume_id] if resume_id else []), '--json',
             *( ['--image', *image_paths] if image_paths else [] ),
             *( ['--skip-git-repo-check'] if workdir == root or root in workdir.parents else [] ),
@@ -748,7 +768,22 @@ def start_agent(context, prompt_override=None, use_region=False):
 
     stdin_content = full_instructions if use_stdin else None
     process = None
+    STATE['active_agent_run_id']=run_id
+    STATE['agent_job_errors']=[]
+    STATE['agent_expected_edit']=task_mode in ('BUILD','EDIT') and not verification_pass
+    STATE['agent_successful_edits']=0
+    STATE['agent_verify_after']=bool(auto_verify and visual and task_mode=='BUILD' and not verification_pass)
+    STATE['agent_is_verification']=bool(verification_pass)
+    if not verification_pass:STATE['agent_original_request']=prompt
     try:
+        if task_mode in ('BUILD','EDIT') and not verification_pass:
+            before=general.checkpoint(root,f'Before AI: {prompt[:70]}')
+            print(f"[ArchForge] Recovery checkpoint saved (version: {before['version_id'][:8]}).",flush=True)
+        connection=STATE.get('connection')
+        if connection:
+            connection.request('blender.poll',dict(instance_id=STATE['instance'],scene_name=context.scene.name,
+                filepath=bpy.data.filepath,selection=[o.name for o in context.selected_objects],
+                **asset_ui.poll_fields(context.scene)),received)
         process = _try_launch(args, stdin_text=stdin_content)
         # If piping via stdin, write the content and close stdin so the process
         # knows there's no more input — do this in a background thread to avoid
@@ -762,6 +797,7 @@ def start_agent(context, prompt_override=None, use_region=False):
                     pass
             threading.Thread(target=_write_stdin, args=(process, stdin_content), daemon=True).start()
     except Exception as err:
+        STATE['active_agent_run_id']=None
         print(f"[ArchForge] Failed to spawn {agent_name}: {err}", flush=True)
         raise
 
@@ -802,9 +838,44 @@ def check_agent():
     message = output.read_text(encoding='utf-8', errors='replace').strip() if output and output.exists() else ''
     agent_name = 'Antigravity' if STATE.get('agent_backend') == 'ANTIGRAVITY' else 'Codex'
     log_path = STATE.get('agent_log') or STATE.get('codex_log')
+    log_text = Path(log_path).read_text(encoding='utf-8', errors='replace') if log_path and Path(log_path).exists() else ''
+    failure = agent_permissions.agent_failure(
+        code, message, log_text, STATE.get('agent_job_errors', ()),
+        STATE.get('agent_expected_edit', False), STATE.get('agent_successful_edits', 0),
+    )
+    verify_after=bool(failure is None and STATE.get('agent_verify_after') and STATE.get('agent_successful_edits',0))
+    original_request=STATE.get('agent_original_request','')
     STATE['agent_process'] = None
     STATE['codex_process'] = None
-    if code == 0:
+    STATE['active_agent_run_id'] = None
+    STATE['agent_job_errors'] = []
+    STATE['agent_expected_edit'] = False
+    STATE['agent_successful_edits'] = 0
+    STATE['agent_verify_after'] = False
+    STATE['agent_is_verification'] = False
+    if verify_after:
+        try:
+            root=Path(STATE.get('root') or default_root())
+            quality=getattr(bpy.context.scene,'archforge_output_quality','HIGH')
+            angles=(35.0,125.0,215.0,305.0) if quality=='MAXIMUM' else (35.0,155.0,275.0)
+            geometry=[obj for obj in bpy.context.scene.objects if obj.type in {'MESH','CURVE','SURFACE','META','FONT','VOLUME','POINTCLOUD','GREASEPENCIL'}]
+            views=capture_selection_views(root,'verify-'+uuid.uuid4().hex[:12],geometry,
+                                          angles=angles,max_dimension=1024 if quality=='MAXIMUM' else 768)
+            if not views:
+                shot=general.screenshot(root,max_dimension=1024 if quality=='MAXIMUM' else 768)
+                views=[shot['path']] if shot.get('path') else []
+            if views:add_reference_images(bpy.context,[Path(path) for path in views])
+            verify_prompt=(f'FINAL VISUAL AUDIT AND REPAIR. Original user goal: {original_request}\n'
+                f'{len(views)} fresh Blender overview images are attached. Inspect the actual result for missing requested elements, '
+                'weak composition, unfinished background, simplistic geometry, poor material variation, lighting, scale, '
+                'floating objects, intersections and camera framing. Use ArchForge to make every useful correction. '
+                'Capture a final viewport image after corrections. If it is already strong, preserve it and report that.')
+            print('[ArchForge] Starting automatic visual audit and repair pass.',flush=True)
+            start_agent(bpy.context,prompt_override=verify_prompt,verification_pass=True)
+            return
+        except Exception as verify_error:
+            failure=f'Automatic visual verification could not start: {verify_error}'
+    if failure is None:
         if not message and log_path and Path(log_path).exists():
             log_text = Path(log_path).read_text(encoding='utf-8', errors='replace').strip()
             clean_lines = [
@@ -823,8 +894,8 @@ def check_agent():
             print(f"[ArchForge] Note: could not save post-generation checkpoint: {cp_err}", flush=True)
     else:
         log_name = Path(log_path).name if log_path else 'log'
-        STATE['status'] = f'{agent_name} failed (exit {code}). Open log: {log_name}'
-        print(f"\n[ArchForge] ❌ {agent_name} task failed (exit code {code}). Log: {log_path}", flush=True)
+        STATE['status'] = f'{failure} Open log: {log_name}'
+        print(f"\n[ArchForge] ❌ {failure} Log: {log_path}", flush=True)
     print("=" * 60 + "\n", flush=True)
     refresh_versions()
     redraw()
@@ -849,13 +920,23 @@ def received(response):
             result = general.run(STATE['root'], job)
             error = result.get('error') if isinstance(result, dict) and result.get('failed') else None
             if error:
+                if STATE.get('active_agent_run_id'):
+                    STATE.setdefault('agent_job_errors', []).append(
+                        {'action': action, 'operation_id': op_id, 'error': error}
+                    )
                 print(f"[ArchForge Bridge] ❌ Job '{action}' failed: {error}", flush=True)
             else:
+                if STATE.get('active_agent_run_id') and action in ('execute','execute_code','build_batch','mesh_edit','restore','asset_import'):
+                    STATE['agent_successful_edits'] = STATE.get('agent_successful_edits', 0) + 1
                 summary = str(result)[:120] if result else 'Done'
                 print(f"[ArchForge Bridge] ✔ Job '{action}' completed: {summary}", flush=True)
         except Exception as e:
             result = None
             error = str(e)
+            if STATE.get('active_agent_run_id'):
+                STATE.setdefault('agent_job_errors', []).append(
+                    {'action': action, 'operation_id': op_id, 'error': error}
+                )
             print(f"[ArchForge Bridge] ❌ Exception in job '{action}': {e}", flush=True)
         STATE['ack'] = dict(instance_id=STATE['instance'], operation_id=job['operation_id'], result=result, error=error)
         STATE['status'] = 'Edit failed · inspect version history' if error else 'Connected · operation finished'
@@ -1229,6 +1310,69 @@ class AF_OT_ClearPrompt(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class AF_OT_ClearStoredData(bpy.types.Operator):
+    bl_idname = 'archforge.clear_stored_data'
+    bl_label = 'Clear All Stored Data'
+    bl_description = 'Clear all stored scene versions, generation logs, jobs, and audit history from the runtime folder'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    include_assets: BoolProperty(
+        name='Include Downloaded Assets Cache',
+        description='Also delete cached materials, models, and asset thumbnails',
+        default=False,
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column()
+        col.label(text='Permanently delete stored data in runtime folder?', icon='QUESTION')
+        box = col.box()
+        box.label(text='• Scene version checkpoints & .blend snapshots', icon='RECOVER_LAST')
+        box.label(text='• AI generation logs & prompts', icon='FILE_TEXT')
+        box.label(text='• Blender jobs & operation receipts', icon='PREFERENCES')
+        box.label(text='• Viewport sketches & focused view images', icon='IMAGE_DATA')
+        box.label(text='• Audit history logs', icon='CONSOLE')
+        col.separator()
+        col.prop(self, 'include_assets')
+
+    def execute(self, context):
+        root = STATE['root'] or context.scene.archforge_runtime_dir or default_root()
+
+        # 1. Attempt runtime RPC if connected
+        conn = STATE.get('connection')
+        if conn and hasattr(conn, 'request'):
+            try:
+                conn.request('clear_data', {'include_assets': self.include_assets}, lambda res: None)
+            except Exception:
+                pass
+
+        # 2. Local disk cleanup
+        try:
+            general.clear_stored_data(root, include_assets=self.include_assets)
+        except Exception as err:
+            self.report({'WARNING'}, f'Partial clear: {err}')
+
+        # 3. Reset in-memory STATE in Blender
+        STATE['versions'] = []
+        STATE['agent_log'] = None
+        STATE['codex_log'] = None
+        STATE['agent_output'] = None
+        STATE['codex_output'] = None
+        STATE['last_usage'] = {}
+        STATE['sketch_viewport'] = None
+        STATE['status'] = 'Data Cleared'
+
+        # 4. Refresh UI
+        refresh_versions()
+        redraw()
+        self.report({'INFO'}, 'All stored ArchForge data has been cleared.')
+        return {'FINISHED'}
+
+
+
 class AF_OT_ToggleViewportHUD(bpy.types.Operator):
     bl_idname = 'archforge.toggle_viewport_hud'
     bl_label = 'Toggle Viewport HUD'
@@ -1284,7 +1428,11 @@ class AF_PT_Main(bpy.types.Panel):
             icon='WINDOW',
             depress=getattr(scene, 'archforge_show_viewport_hud', False),
         )
-        header_row.label(text='v0.2.5')
+        try:
+            from .version import VERSION as addon_version
+        except Exception:
+            addon_version = ''
+        header_row.label(text='v' + addon_version if addon_version else 'v')
 
         conn_row = header_box.row(align=True)
         conn = STATE.get('connection')
@@ -1388,12 +1536,13 @@ class AF_PT_Main(bpy.types.Panel):
             layout.prop(scene, 'archforge_task_mode')
             layout.prop(scene, 'archforge_verification')
             budget_box = layout.box()
-            budget_box.label(text='MCP Call Controls', icon='SETTINGS')
-            budget_box.prop(scene, 'archforge_max_mcp_calls')
-            budget_row = budget_box.row(align=True)
-            budget_row.prop(scene, 'archforge_max_edit_attempts')
-            budget_row.prop(scene, 'archforge_max_job_polls')
-            budget_box.label(text='Limits are applied to the next agent task.', icon='INFO')
+            budget_box.label(text='Generation Profile', icon='SETTINGS')
+            budget_box.prop(scene, 'archforge_resource_mode', text='Mode')
+            budget_box.prop(scene, 'archforge_output_quality', text='Quality')
+            budget_box.prop(scene, 'archforge_permission_mode', text='Permissions')
+            limits=workflow.profile(scene.archforge_resource_mode,scene.archforge_output_quality)
+            budget_box.label(text=f"Starts {limits['initial_calls']} calls · {limits['initial_edits']} edits", icon='INFO')
+            budget_box.label(text=f"Auto-expands to {limits['max_calls']} calls · {limits['max_edits']} edits")
             row = layout.row(align=True)
             row.prop(scene, 'archforge_continue_conversation')
             row.operator('archforge.new_conversation', text='New Conversation')
@@ -1476,9 +1625,10 @@ class AF_PT_Main(bpy.types.Panel):
             h_row.label(text='Scene Versions', icon='RECOVER_LAST')
             h_row.label(text=f'{len(STATE["versions"])} saved')
 
-            create_row = layout.row()
+            create_row = layout.row(align=True)
             create_row.scale_y = 1.2
             create_row.operator('archforge.checkpoint', text='💾 Save Checkpoint', icon='ADD')
+            create_row.operator('archforge.clear_stored_data', text='', icon='TRASH')
 
             if not STATE['versions']:
                 empty_card = layout.box()
@@ -1522,6 +1672,15 @@ class AF_PT_Main(bpy.types.Panel):
                 col.prop(scene, 'archforge_codex_path', text='CLI Path')
             col.label(text=STATE.get('model_status', 'Models are loaded from the active CLI account.'), icon='INFO')
 
+            permissions_box=layout.box()
+            permissions_box.label(text='Agent Permissions',icon='LOCKED')
+            permissions_box.prop(scene,'archforge_permission_mode',text='Generation mode')
+            permissions_box.prop(scene,'archforge_allow_python_execution',text='Allow arbitrary Python execution')
+            if agent == 'ANTIGRAVITY':
+                permissions_box.prop(scene,'archforge_allow_antigravity_mcp',text='Allow ArchForge MCP tools')
+            permissions_box.prop(scene,'archforge_unattended_agent_permissions',text='Allow unattended CLI permissions')
+            permissions_box.label(text='Python approval is stored per Blender scene.',icon='INFO')
+
             layout.separator(factor=0.5)
 
             hud_box = layout.box()
@@ -1537,11 +1696,16 @@ class AF_PT_Main(bpy.types.Panel):
             layout.separator(factor=0.5)
 
             runtime_box = layout.box()
-            runtime_box.label(text='Runtime Bridge', icon='NETWORK_DRIVE')
+            runtime_box.label(text='Runtime Bridge & Storage', icon='NETWORK_DRIVE')
             col_rt = runtime_box.column()
             col_rt.use_property_split = True
             col_rt.use_property_decorate = False
             col_rt.prop(scene, 'archforge_runtime_dir', text='Data Directory')
+
+            runtime_box.separator(factor=0.5)
+            row_clear = runtime_box.row(align=True)
+            row_clear.scale_y = 1.25
+            row_clear.operator('archforge.clear_stored_data', text='Clear All Stored Data…', icon='TRASH')
 
 
 CLASSES = (
@@ -1560,6 +1724,7 @@ CLASSES = (
     AF_OT_RestoreVersion,
     AF_OT_AppendPromptTag,
     AF_OT_ClearPrompt,
+    AF_OT_ClearStoredData,
     AF_OT_ToggleViewportHUD,
     AF_OT_ResetHUDTransform,
     AF_OT_RefreshModels,
@@ -1587,26 +1752,53 @@ def register():
         description='After editing, automatically take a viewport render, verify against prompt, and execute fixes',
         default=True,
     )
+    bpy.types.Scene.archforge_resource_mode = EnumProperty(
+        name='MCP workload',
+        description='Choose a tested MCP call budget for the kind of Blender work',
+        items=workflow.RESOURCE_MODE_ITEMS,
+        default='FULL_BUILD',
+    )
+    bpy.types.Scene.archforge_output_quality = EnumProperty(
+        name='Output quality',description='Set the intended finish level independently of scene size',
+        items=workflow.QUALITY_ITEMS,default='HIGH')
+    bpy.types.Scene.archforge_permission_mode = EnumProperty(
+        name='Generation permissions',description='Autonomous authorizes ArchForge editing and asset work for this scene',
+        items=workflow.PERMISSION_ITEMS,default='AUTONOMOUS')
     bpy.types.Scene.archforge_max_mcp_calls = IntProperty(
         name='Maximum MCP calls',
         description='Hard call budget supplied to the agent for one task, including status polls and asset operations',
-        default=6,
+        default=16,
         min=1,
         max=50,
     )
     bpy.types.Scene.archforge_max_edit_attempts = IntProperty(
         name='Maximum edit attempts',
         description='Maximum coherent Blender edit operations the agent may attempt in one task',
-        default=1,
+        default=3,
         min=1,
         max=10,
     )
     bpy.types.Scene.archforge_max_job_polls = IntProperty(
         name='Maximum job polls',
         description='Maximum status polls per operation; complete results do not need polling',
-        default=1,
+        default=4,
         min=0,
         max=10,
+    )
+    bpy.types.Scene.archforge_allow_python_execution = BoolProperty(
+        name='Allow arbitrary Python execution',
+        description='Permit the destructive execute_blender_python MCP tool for this scene',
+        default=True,
+    )
+    bpy.types.Scene.archforge_allow_antigravity_mcp = BoolProperty(
+        name='Allow ArchForge MCP tools',
+        description='On the next prompt, add only mcp(archforge/*) to Antigravity permissions for headless ArchForge access',
+        default=True,
+    )
+    bpy.types.Scene.archforge_unattended_agent_permissions = BoolProperty(
+        name='Allow unattended CLI permissions',
+        description='Let Antigravity bypass its interactive permission prompts for this scene; use only with trusted prompts and tools',
+        default=True,
     )
     bpy.types.Scene.archforge_only_selected = BoolProperty(
         name='Only selected objects',
@@ -1734,9 +1926,15 @@ def unregister():
         'archforge_include_selection',
         'archforge_only_selected',
         'archforge_auto_verify',
+        'archforge_resource_mode',
+        'archforge_output_quality',
+        'archforge_permission_mode',
         'archforge_max_mcp_calls',
         'archforge_max_edit_attempts',
         'archforge_max_job_polls',
+        'archforge_allow_python_execution',
+        'archforge_allow_antigravity_mcp',
+        'archforge_unattended_agent_permissions',
         'archforge_show_viewport_hud',
         'archforge_hud_width',
         'archforge_hud_scale',

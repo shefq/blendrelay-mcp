@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "archforge-mcp"
-version = "0.2.4"
+dynamic = ["version"]
 description = "Local architectural modeling tools and a procedural Blender extension"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -17,6 +17,9 @@ archforge-runtime = "archforge_runtime.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "archforge_blender.version.__version__"}
 
 [tool.setuptools.package-data]
 archforge_blender = ["*.py", "blender_manifest.toml", "COPYING.txt"]

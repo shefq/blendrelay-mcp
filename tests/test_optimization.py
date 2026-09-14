@@ -5,7 +5,7 @@ from pathlib import Path
 from archforge_blender import conversation
 from archforge_mcp.job_results import wait_and_compact
 from archforge_mcp.server import handle
-from archforge_blender.workflow import compact, choose, instructions
+from archforge_blender.workflow import compact, choose, instructions, RESOURCE_MODE_ITEMS, resource_limits, profile
 from archforge_blender.run_metrics import Metrics
 
 
@@ -42,11 +42,22 @@ class OptimizationTests(unittest.TestCase):
     def test_failures_and_image_on_submit(self):
         c=FakeClient()
         c.call=lambda *args:dict(operation_id='bad',status='complete',result={'executed':False,'error':'bad mesh'})
-        out=handle({'method':'tools/call','params':{'name':'archforge_blender_command','arguments':{'action':'execute'}}},c)
+        out=handle({'method':'tools/call','params':{'name':'execute_blender_python','arguments':{'code':'result=True'}}},c)
         self.assertTrue(out['isError'])
         c.call=lambda *args:dict(operation_id='image',status='complete',result={'image':'abc','mime_type':'image/png'})
-        out=handle({'method':'tools/call','params':{'name':'archforge_blender_command','arguments':{'action':'screenshot'}}},c)
+        out=handle({'method':'tools/call','params':{'name':'capture_viewport','arguments':{}}},c)
         self.assertEqual(out['content'][0]['type'],'image')
+
+    def test_python_edits_do_not_checkpoint_each_stage(self):
+        client=FakeClient()
+        handle({'method':'tools/call','params':{'name':'execute_blender_python','arguments':{'code':'result=True'}}},client)
+        submit=next(args for method,args in client.calls if method=='blender.submit')
+        self.assertNotIn('save_checkpoint',submit['arguments'])
+
+    def test_batch_scene_tool_is_public(self):
+        output=handle({'method':'tools/list','params':{}},FakeClient())
+        names={tool['name'] for tool in output['tools']}
+        self.assertIn('build_scene_batch',names)
 
     def test_compact_context(self):
         data={'vertices':[{'index':1,'local':[.123456789],'world':[123]}],
@@ -60,9 +71,30 @@ class OptimizationTests(unittest.TestCase):
 
     def test_workflow_instructions_include_call_controls(self):
         text=instructions('EDIT','instance',False,False,True,4,1,0)
-        self.assertIn('no more than 4 total ArchForge MCP tool calls',text)
-        self.assertIn('no more than 1 edit attempt',text)
-        self.assertIn('no more than 0 status poll',text)
+        self.assertIn('starting allowance is 4 MCP calls and 1 accepted edits',text)
+        self.assertIn('up to 0 times',text)
+        self.assertIn('does not consume an edit',text)
+
+    def test_four_resource_modes(self):
+        self.assertEqual(len(RESOURCE_MODE_ITEMS),4)
+        self.assertEqual(resource_limits('OBJECT_MATERIAL'),(15,4,10))
+        self.assertEqual(resource_limits('FULL_BUILD'),(40,10,20))
+        self.assertEqual(resource_limits('BUILD_ASSETS'),(60,15,30))
+        self.assertEqual(resource_limits('COMPLEX_SCENE'),(100,25,40))
+        maximum=profile('COMPLEX_SCENE','MAXIMUM')
+        self.assertEqual((maximum['initial_calls'],maximum['initial_edits']),(135,34))
+        self.assertEqual((maximum['max_calls'],maximum['max_edits']),(250,60))
+
+    def test_complex_maximum_instructions_are_quality_driven(self):
+        limits=profile('COMPLEX_SCENE','MAXIMUM')
+        text=instructions('BUILD','instance',False,True,False,
+            limits['initial_calls'],limits['initial_edits'],limits['polls_per_job'],
+            'COMPLEX_SCENE','MAXIMUM',limits['verification_passes'],True)
+        self.assertIn('complex production scene',text)
+        self.assertIn('execute_blender_python is the primary creation tool',text)
+        self.assertIn('It expands\nautomatically',text)
+        self.assertIn('at least 4 useful viewport',text)
+        self.assertIn('Autonomous generation',text)
 
     def test_metrics_count_completed_once(self):
         m=Metrics()

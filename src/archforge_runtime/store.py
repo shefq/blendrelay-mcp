@@ -74,4 +74,15 @@ class Store:
     def pending(self):
         with self.lock:return [json.loads(r[0]) for r in self.db.execute("SELECT payload FROM operations WHERE state IN ('staging','projecting','recovery_required')")]
 
+    def clear(self):
+        with self.lock, self.db:
+            self.db.executescript('''
+            DELETE FROM revisions;
+            DELETE FROM plans;
+            DELETE FROM operations;
+            VACUUM;
+            ''')
+            self.db.commit()
+
     def close(self):self.db.close()
+

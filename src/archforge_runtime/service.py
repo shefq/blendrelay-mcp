@@ -1,6 +1,8 @@
 """Durable semantic changes and recoverable live Blender projection."""
 import copy
+from datetime import datetime, timezone
 import json
+import shutil
 import time
 import threading
 from pathlib import Path
@@ -12,11 +14,13 @@ from .store import Store
 
 from .bridge import Bridge
 from .asset_service import AssetService
+from archforge_blender.version import VERSION
 
 
 class Service(Bridge, AssetService):
     def __init__(self,root,source_roots=()):
         self.store=Store(root);self.lock=threading.RLock();self.sessions={};self.source_roots=[Path(p).resolve() for p in source_roots]
+        self.audit_path=self.store.root/'audit.jsonl'
         self.bridge_init()
         self.assets_init()
         # Uncommitted staging cannot be trusted after a runtime crash.
@@ -27,20 +31,79 @@ class Service(Bridge, AssetService):
 
     def dispatch(self,method,p):
         if not isinstance(p,dict):raise DomainError('INVALID_INPUT','Parameters must be an object')
+        started=time.monotonic();ok=False;error_code=None
         with self.lock:
             fn=getattr(self,'rpc_'+method.replace('.','_'),None)
             if fn is None:raise DomainError('UNKNOWN_METHOD',method)
-            try:return fn(**p)
-            except TypeError as e:raise DomainError('INVALID_ARGUMENTS',str(e))
-            except ValueError as e:raise DomainError('ASSET_POLICY' if method.startswith('assets.') else 'INVALID_ARGUMENTS',str(e))
+            try:
+                result=fn(**p);ok=True;return result
+            except DomainError as e:
+                error_code=e.code;raise
+            except TypeError as e:
+                error_code='INVALID_ARGUMENTS';raise DomainError(error_code,str(e))
+            except ValueError as e:
+                error_code='ASSET_POLICY' if method.startswith('assets.') else 'INVALID_ARGUMENTS';raise DomainError(error_code,str(e))
+            finally:
+                self._audit(method,p,ok,error_code,time.monotonic()-started)
+
+    def _audit(self,method,params,ok,error_code,duration):
+        """Record operation metadata without prompts, Python source, tokens or file contents."""
+        try:
+            if self.audit_path.exists() and self.audit_path.stat().st_size>5*1024*1024:
+                previous=self.audit_path.with_suffix('.previous.jsonl')
+                if previous.exists():previous.unlink()
+                self.audit_path.replace(previous)
+            safe={key:str(params[key])[:120] for key in ('instance_id','operation_id','job_id','action') if key in params}
+            entry={'time':datetime.now(timezone.utc).isoformat(),'method':method,'ok':ok,
+                   'error_code':error_code,'duration_ms':round(duration*1000,2),'fields':sorted(params),'identifiers':safe}
+            with self.audit_path.open('a',encoding='utf-8') as stream:stream.write(json.dumps(entry,ensure_ascii=True)+'\n')
+        except OSError:pass
 
     def rpc_capabilities(self):
-        return {'product':'ArchForge MCP','version':'0.2.4','protocol_version':1,'schema_version':'1.0.0',
+        return {'product':'ArchForge MCP','version':VERSION,'protocol_version':1,'mcp_protocol':'2026-07-28','schema_version':'1.0.0',
             'legacy_template_operations':OPERATIONS,'legacy_asset_families':['table','chair','bed','cabinet','shelf'],
             'general_blender':{'enabled':True,'python_execution':True,'full_scene_versions':True,'architectural_schema_required':False},
             'legacy_template_limits':{'storeys':1,'wall_geometry':'orthogonal','roof_families':['flat','gable','none']},
             'legacy_native_planner':'bounded templates; external MCP hosts can submit structured changes',
             'image_workflow':'inspect images with host vision, then create arbitrary geometry through blender.submit execute; calibrated rectangles are a legacy helper'}
+
+    def rpc_clear_data(self, include_assets=False):
+        """Clear operational logs, jobs, checkpoints, conversations, and optional asset cache."""
+        with self.lock:
+            try:
+                self.store.clear()
+            except Exception:
+                pass
+            for path in self.bridge_dir.glob('*.json'):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            for audit in (self.audit_path, self.audit_path.with_suffix('.previous.jsonl')):
+                try:
+                    if audit.exists():
+                        with audit.open('w', encoding='utf-8') as f:
+                            f.truncate(0)
+                except OSError:
+                    pass
+            root = self.store.root
+            subdirs = ['agent_runs', 'scene_versions', 'conversations', 'restored_scenes', 'focused_views', 'selection_views']
+            if include_assets:
+                subdirs.append('assets')
+            for name in subdirs:
+                target = root / name
+                if target.is_dir():
+                    try:
+                        shutil.rmtree(target, ignore_errors=True)
+                        target.mkdir(parents=True, exist_ok=True)
+                    except Exception:
+                        pass
+            for sketch_file in root.glob('sketch_viewport.*'):
+                try:
+                    sketch_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return {'cleared': True, 'root': str(root)}
 
     def rpc_project_create(self,prompt=None,width=12,depth=10,bedrooms=3,height=2.8,roof='gable',furnish=True,name='ArchForge house',rectangles=None):
         model=from_rectangles(rectangles,name=name,height=height,roof=roof,furnish=furnish) if rectangles else parse_brief(prompt) if prompt else house(width,depth,bedrooms,height,roof,furnish,name)
