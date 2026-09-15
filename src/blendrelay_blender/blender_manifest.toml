@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "blendrelay_mcp"
-version = "0.7.0"
+version = "0.7.1"
 name = "BlendRelay MCP"
 tagline = "Control Blender with AI agents through MCP"
 maintainer = "BlendRelay MCP contributors"

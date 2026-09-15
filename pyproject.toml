@@ -5,13 +5,25 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "blendrelay-mcp"
 dynamic = ["version"]
-description = "General-purpose MCP server and AI workflow extension for Blender"
+description = "Blender AI add-on and MCP server for prompt-based 3D creation and editing"
 requires-python = ">=3.11"
 readme = "README.md"
 license = "MIT AND GPL-3.0-or-later"
 license-files = ["LICENSE", "src/blendrelay_blender/COPYING.txt"]
 dependencies = []
-keywords = ["blender", "mcp", "model-context-protocol", "ai", "3d"]
+keywords = [
+    "blender",
+    "blender-addon",
+    "blender-mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-3d",
+    "3d-modeling",
+    "generative-ai",
+    "text-to-blender",
+    "codex",
+    "claude",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Plugins",
@@ -23,8 +35,10 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/shefq/blendrelay-mcp"
-Repository = "https://github.com/shefq/blendrelay-mcp"
+Documentation = "https://github.com/shefq/blendrelay-mcp#readme"
+Source = "https://github.com/shefq/blendrelay-mcp"
 Issues = "https://github.com/shefq/blendrelay-mcp/issues"
+Changelog = "https://github.com/shefq/blendrelay-mcp/releases"
 
 [project.scripts]
 blendrelay-mcp = "blendrelay_mcp.cli:main"

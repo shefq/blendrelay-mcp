@@ -78,7 +78,7 @@ class CliHealthTests(unittest.TestCase):
                 extension = version_root / "extensions" / "user_default" / "blendrelay_mcp"
                 extension.mkdir(parents=True)
                 (extension / "blender_manifest.toml").write_text(
-                    'schema_version="1.0.0"\nid="blendrelay_mcp"\nversion="0.7.0"\n',
+                    'schema_version="1.0.0"\nid="blendrelay_mcp"\nversion="0.7.1"\n',
                     encoding="utf-8",
                 )
                 self.assertEqual(_run_doctor(str(runtime)), 0)
