@@ -16,17 +16,75 @@ from . import sketch, edit_context, scene_helpers
 
 # ── Version / checkpoint helpers ─────────────────────────────────────────────
 
-def version_root(root):
-    scene = bpy.context.scene
-    if not scene.get('archforge_workspace_id'):
-        scene['archforge_workspace_id'] = uuid.uuid4().hex
-    identity = scene['archforge_workspace_id']
+def workspace_id(scene=None, root=None):
+    """Return the persistent scene identity, recovering it by file path when possible."""
+    scene = scene or bpy.context.scene
+    identity = scene.get('archforge_workspace_id')
+    if not identity and root is not None and bpy.data.filepath:
+        index_path = Path(root).resolve() / 'workspace_index.json'
+        try:
+            index = json.loads(index_path.read_text(encoding='utf-8'))
+            identity = index.get(str(Path(bpy.data.filepath).resolve()).casefold())
+        except (OSError, ValueError, TypeError):
+            identity = None
+    if not identity:
+        identity = uuid.uuid4().hex
     if not isinstance(identity, str) or len(identity) != 32 or any(c not in '0123456789abcdef' for c in identity):
         raise RuntimeError('Invalid scene workspace ID')
-    path = Path(root) / 'scene_versions' / identity
+    scene['archforge_workspace_id'] = identity
+    return identity
+
+
+def workspace_root(root, scene=None):
+    """Resolve and initialize this scene's data directory below the shared runtime root."""
+    scene = scene or bpy.context.scene
+    base = Path(root).resolve()
+    identity = workspace_id(scene, base)
+    path = base / 'workspaces' / identity
     path.mkdir(parents=True, exist_ok=True)
+
+    # Migrate checkpoints and conversation state created by releases before scene workspaces.
+    old_versions = base / 'scene_versions' / identity
+    new_versions = path / 'scene_versions'
+    if old_versions.is_dir() and not new_versions.exists():
+        new_versions.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_versions), str(new_versions))
+    old_conversation = base / 'conversations' / (identity + '.json')
+    new_conversation = path / 'conversations' / 'state.json'
+    if old_conversation.is_file() and not new_conversation.exists():
+        new_conversation.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_conversation), str(new_conversation))
+
+    metadata = {'workspace_id': identity, 'scene_name': scene.name,
+                'blend_file': bpy.data.filepath or None}
+    metadata_path = path / 'workspace.json'
+    try:
+        current = json.loads(metadata_path.read_text(encoding='utf-8')) if metadata_path.exists() else None
+    except (OSError, ValueError):
+        current = None
+    if current != metadata:
+        temporary = metadata_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(metadata, indent=2), encoding='utf-8')
+        temporary.replace(metadata_path)
+    if bpy.data.filepath:
+        index_path = base / 'workspace_index.json'
+        try:
+            index = json.loads(index_path.read_text(encoding='utf-8')) if index_path.exists() else {}
+        except (OSError, ValueError, TypeError):
+            index = {}
+        key = str(Path(bpy.data.filepath).resolve()).casefold()
+        if index.get(key) != identity:
+            index[key] = identity
+            temporary = index_path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(index, indent=2), encoding='utf-8')
+            temporary.replace(index_path)
     return path
 
+
+def version_root(root):
+    path = workspace_root(root) / 'scene_versions'
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 def versions(root):
     path = version_root(root) / 'index.json'
@@ -60,7 +118,7 @@ def restore(root, version_id):
     if path.parent != version_root(root).resolve() or not path.is_file():
         raise RuntimeError('Version file is unavailable')
     backup = checkpoint(root, 'Before restoring ' + entry['label'])
-    working = Path(root) / 'restored_scenes' / (uuid.uuid4().hex + '.blend')
+    working = workspace_root(root) / 'restored_scenes' / (uuid.uuid4().hex + '.blend')
     working.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, working)
     bpy.ops.wm.open_mainfile(filepath=str(working), load_ui=False, use_scripts=False)
@@ -171,37 +229,80 @@ def _object_aabb(obj):
 
 
 def _object_summary(obj, detail=False):
-    """Compact dict for one object. detail=True adds AABB, mesh counts, materials."""
-    info = {
-        'name': obj.name,
-        'type': obj.type,
-        'location': [round(float(obj.location.x), 3),
-                     round(float(obj.location.y), 3),
-                     round(float(obj.location.z), 3)],
-        'visible': obj.visible_get(),
-    }
-    if detail:
-        info['rotation'] = [round(float(v), 4) for v in obj.rotation_euler]
-        info['scale'] = [round(float(v), 4) for v in obj.scale]
-        aabb = _object_aabb(obj)
-        if aabb:
-            info.update(aabb)
-        if obj.type == 'MESH' and obj.data:
-            mesh = obj.data
-            info['mesh'] = {
-                'vertices': len(mesh.vertices),
-                'edges': len(mesh.edges),
-                'polygons': len(mesh.polygons),
-            }
-        if hasattr(obj.data, 'materials'):
-            info['materials'] = [m.name if m else None for m in obj.data.materials]
-        parent = getattr(obj, 'parent', None)
-        if parent:
-            info['parent'] = parent.name
-        modifiers = [m.type for m in (getattr(obj, 'modifiers', None) or [])[:8]]
-        if modifiers:
-            info['modifiers'] = modifiers
+    info = {'name': obj.name, 'type': obj.type,
+            'location': [round(float(v), 3) for v in obj.location],
+            'visible': obj.visible_get(), 'hide_viewport': obj.hide_viewport,
+            'hide_render': obj.hide_render}
+    if not detail: return info
+    info.update(rotation=[round(float(v), 4) for v in obj.rotation_euler],
+                scale=[round(float(v), 4) for v in obj.scale],
+                mode=getattr(obj, 'mode', 'OBJECT'))
+    bounds = _object_aabb(obj)
+    if bounds: info.update(bounds)
+    data = getattr(obj, 'data', None)
+    if obj.type == 'MESH' and data:
+        info['mesh'] = {'vertices': len(data.vertices), 'edges': len(data.edges),
+                        'polygons': len(data.polygons), 'uv_layers': [layer.name for layer in data.uv_layers],
+                        'shape_keys': [key.name for key in data.shape_keys.key_blocks] if data.shape_keys else []}
+        info['vertex_groups'] = [group.name for group in obj.vertex_groups[:50]]
+    elif obj.type in {'CURVE', 'SURFACE', 'FONT'} and data:
+        info['curve'] = {'splines': len(getattr(data, 'splines', [])),
+                         'dimensions': getattr(data, 'dimensions', None),
+                         'resolution_u': getattr(data, 'resolution_u', None)}
+        if obj.type == 'FONT': info['curve']['text'] = data.body[:2000]
+    elif obj.type == 'ARMATURE' and data:
+        info['armature'] = {'bones': len(data.bones), 'bone_names': [bone.name for bone in data.bones[:100]],
+                            'display_type': obj.data.display_type}
+    elif obj.type == 'CAMERA' and data:
+        info['camera'] = {'type': data.type, 'lens': data.lens, 'clip_start': data.clip_start,
+                          'clip_end': data.clip_end, 'dof': data.dof.use_dof}
+    elif obj.type == 'LIGHT' and data:
+        info['light'] = {'type': data.type, 'energy': data.energy, 'color': list(data.color),
+                         'use_shadow': getattr(data, 'use_shadow', None)}
+    if data and hasattr(data, 'materials'):
+        info['materials'] = [material.name if material else None for material in data.materials]
+    if obj.parent: info['parent'] = obj.parent.name
+    info['children'] = [child.name for child in obj.children[:50]]
+    info['modifiers'] = [{'name': modifier.name, 'type': modifier.type} for modifier in obj.modifiers[:30]]
+    info['constraints'] = [{'name': constraint.name, 'type': constraint.type,
+                            'target': getattr(getattr(constraint, 'target', None), 'name', None)}
+                           for constraint in obj.constraints[:30]]
+    animation = getattr(obj, 'animation_data', None)
+    if animation:
+        info['animation'] = {'action': animation.action.name if animation.action else None,
+                             'nla_tracks': [track.name for track in animation.nla_tracks[:30]],
+                             'drivers': len(animation.drivers)}
     return info
+
+
+def inspect_blender_data(data_type, offset=0, limit=50):
+    if not isinstance(offset, int) or offset < 0: raise ValueError('offset must be >= 0')
+    limit = max(1, min(200, int(limit)))
+    sources = {
+        'objects': bpy.data.objects, 'collections': bpy.data.collections, 'materials': bpy.data.materials,
+        'node_groups': bpy.data.node_groups, 'actions': bpy.data.actions, 'armatures': bpy.data.armatures,
+        'images': bpy.data.images, 'worlds': bpy.data.worlds, 'cameras': bpy.data.cameras,
+        'lights': bpy.data.lights, 'scenes': bpy.data.scenes,
+    }
+    if data_type not in sources: raise ValueError('Unsupported Blender data type')
+    values = list(sources[data_type]); page = values[offset:offset + limit]; items = []
+    for item in page:
+        row = {'name': item.name, 'users': item.users, 'library': item.library.filepath if item.library else None}
+        if data_type == 'objects': row = _object_summary(item, detail=True)
+        elif data_type == 'collections': row.update(objects=[obj.name for obj in item.objects[:100]], children=[c.name for c in item.children[:50]])
+        elif data_type == 'materials': row.update(use_nodes=item.use_nodes, node_count=len(item.node_tree.nodes) if item.node_tree else 0)
+        elif data_type == 'node_groups': row.update(tree_type=item.bl_idname, nodes=len(item.nodes), links=len(item.links))
+        elif data_type == 'actions': row.update(frame_range=list(item.frame_range), fcurves=len(getattr(item, 'fcurves', [])))
+        elif data_type == 'armatures': row.update(bones=[bone.name for bone in item.bones[:100]])
+        elif data_type == 'images': row.update(size=list(item.size), filepath=item.filepath, source=item.source)
+        elif data_type == 'worlds': row.update(use_nodes=item.use_nodes, node_count=len(item.node_tree.nodes) if item.node_tree else 0)
+        elif data_type == 'cameras': row.update(type=item.type, lens=item.lens, clip=[item.clip_start, item.clip_end])
+        elif data_type == 'lights': row.update(type=item.type, energy=item.energy, color=list(item.color))
+        elif data_type == 'scenes': row.update(frame=[item.frame_start, item.frame_end, item.frame_current], engine=item.render.engine,
+                                               objects=len(item.objects), world=item.world.name if item.world else None)
+        items.append(row)
+    return {'data_type': data_type, 'total': len(values), 'offset': offset,
+            'truncated': offset + limit < len(values), 'items': items}
 
 
 # ── Named inspect / info functions (blender-mcp pattern) ─────────────────────
@@ -224,6 +325,13 @@ def get_scene_info():
         'object_count': len(all_objects),
         'only_selected': only_selected,
         'selected': selected,
+        'mode': bpy.context.mode,
+        'active_object': bpy.context.active_object.name if bpy.context.active_object else None,
+        'frame': {'start': scene.frame_start, 'end': scene.frame_end, 'current': scene.frame_current},
+        'render': {'engine': scene.render.engine, 'resolution': [scene.render.resolution_x, scene.render.resolution_y],
+                   'camera': scene.camera.name if scene.camera else None},
+        'world': scene.world.name if scene.world else None,
+        'collections': [c.name for c in bpy.data.collections[:100]],
         'viewport_sketch': sketch.payload(scene),
         'objects': [_object_summary(o) for o in all_objects[:20]],
         'note': note,
@@ -262,7 +370,7 @@ def inspect_scene(offset=0, limit=20, object_name=None, names=None):
             else:
                 result_objs.append({'name': n, 'error': 'not found'})
         return dict(scene=bpy.context.scene.name, filepath=bpy.data.filepath,
-                    mode=bpy.context.mode, mesh_edit=edit_context.capture(bpy.context), total=len(all_objects),
+                    mode=bpy.context.mode, edit_context=edit_context.capture(bpy.context), total=len(all_objects),
                     only_selected=only_selected,
                     selection=[o.name for o in bpy.context.selected_objects],
                     viewport_sketch=sketch.payload(bpy.context.scene),
@@ -274,7 +382,7 @@ def inspect_scene(offset=0, limit=20, object_name=None, names=None):
         filtered = all_objects
 
     return dict(scene=bpy.context.scene.name, filepath=bpy.data.filepath,
-                mode=bpy.context.mode, mesh_edit=edit_context.capture(bpy.context), total=len(filtered),
+                mode=bpy.context.mode, edit_context=edit_context.capture(bpy.context), total=len(filtered),
                 only_selected=only_selected,
                 selection=[o.name for o in bpy.context.selected_objects],
                 viewport_sketch=sketch.payload(bpy.context.scene),
@@ -413,33 +521,84 @@ def execute(root, code, label='Prompt edit', save_checkpoint=False, **kwargs):
 
 
 def build_batch(operations, label='Scene batch'):
-    """Execute common creation operations without requiring generated boilerplate."""
-    if not isinstance(operations,list) or not operations:raise ValueError('operations must be a non-empty list')
-    created=[];materials=[]
-    for index,operation in enumerate(operations):
-        if not isinstance(operation,dict):raise ValueError(f'operation {index} must be an object')
-        kind=operation.get('type');name=operation.get('name',f'ArchForge {index+1}')
-        target=scene_helpers.collection(operation['collection']) if operation.get('collection') else None
-        if kind=='collection':obj=scene_helpers.collection(name)
-        elif kind=='material':
-            obj=scene_helpers.material(name,operation.get('color',(.8,.8,.8,1)),operation.get('metallic',0),operation.get('roughness',.5));materials.append(obj.name)
-        elif kind=='cube':
-            mat=bpy.data.materials.get(operation.get('material',''))
-            obj=scene_helpers.cube(name,operation.get('location',(0,0,0)),operation.get('dimensions',(1,1,1)),mat,target,operation.get('bevel',0))
-        elif kind=='cylinder':
-            mat=bpy.data.materials.get(operation.get('material',''))
-            obj=scene_helpers.cylinder(name,operation.get('location',(0,0,0)),operation.get('radius',1),operation.get('depth',2),operation.get('vertices',32),mat,target)
-        elif kind=='area_light':obj=scene_helpers.area_light(name,operation.get('location',(0,0,5)),operation.get('energy',1000),operation.get('size',5),operation.get('color',(1,1,1)),operation.get('rotation',(0,0,0)))
-        elif kind=='camera':obj=scene_helpers.camera(name,operation.get('location',(10,-10,8)),operation.get('target',(0,0,0)),operation.get('lens',45))
-        elif kind=='world':obj=scene_helpers.world(operation.get('color',(.05,.05,.05,1)),operation.get('strength',.5))
-        elif kind=='assign_material':
-            obj=bpy.data.objects.get(operation.get('object',''));mat=bpy.data.materials.get(operation.get('material',''))
-            if not obj or not mat:raise ValueError(f'operation {index}: object and material must exist')
-            scene_helpers.assign(obj,mat)
-        else:raise ValueError(f'operation {index}: unsupported type {kind!r}')
-        if hasattr(obj,'name') and kind not in ('material','world'):created.append(obj.name)
+    if not isinstance(operations, list) or not operations: raise ValueError('operations must be a non-empty list')
+    created, materials = [], []
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict): raise ValueError(f'operation {index} must be an object')
+        kind = operation.get('type'); name = operation.get('name', f'ArchForge {index + 1}')
+        target = scene_helpers.collection(operation['collection']) if operation.get('collection') else None
+        material = bpy.data.materials.get(operation.get('material', ''))
+        obj = None
+        if kind == 'collection': obj = scene_helpers.collection(name)
+        elif kind == 'material':
+            obj = scene_helpers.material(name, operation.get('color', (.8,.8,.8,1)), operation.get('metallic', 0), operation.get('roughness', .5)); materials.append(obj.name)
+        elif kind == 'cube': obj = scene_helpers.cube(name, operation.get('location', (0,0,0)), operation.get('dimensions', (1,1,1)), material, target, operation.get('bevel', 0))
+        elif kind == 'cylinder': obj = scene_helpers.cylinder(name, operation.get('location', (0,0,0)), operation.get('radius', 1), operation.get('depth', 2), operation.get('vertices', 32), material, target)
+        elif kind in {'sphere','cone','plane','torus'}:
+            operators = {'sphere': bpy.ops.mesh.primitive_uv_sphere_add, 'cone': bpy.ops.mesh.primitive_cone_add,
+                         'plane': bpy.ops.mesh.primitive_plane_add, 'torus': bpy.ops.mesh.primitive_torus_add}
+            kwargs = {'location': operation.get('location', (0,0,0)), 'rotation': operation.get('rotation', (0,0,0))}
+            if kind == 'sphere': kwargs.update(segments=operation.get('vertices', 32), radius=operation.get('radius', 1))
+            elif kind == 'cone': kwargs.update(vertices=operation.get('vertices', 32), radius1=operation.get('radius', 1), depth=operation.get('depth', 2))
+            elif kind == 'plane': kwargs.update(size=operation.get('size', 2))
+            else: kwargs.update(major_radius=operation.get('radius', 1), major_segments=operation.get('vertices', 48))
+            operators[kind](**kwargs); obj = bpy.context.object; obj.name = name
+            if operation.get('dimensions'): obj.dimensions = operation['dimensions']
+            if target: scene_helpers._move_to(obj, target)
+            if material: scene_helpers.assign(obj, material)
+        elif kind == 'empty':
+            obj = bpy.data.objects.new(name, None); (target or bpy.context.scene.collection).objects.link(obj); obj.location = operation.get('location', (0,0,0))
+        elif kind == 'text':
+            data = bpy.data.curves.new(name, 'FONT'); data.body = operation.get('text', '')
+            obj = bpy.data.objects.new(name, data); (target or bpy.context.scene.collection).objects.link(obj); obj.location = operation.get('location', (0,0,0))
+        elif kind in {'area_light','point_light','sun_light'}:
+            light_type = {'area_light':'AREA','point_light':'POINT','sun_light':'SUN'}[kind]
+            data = bpy.data.lights.new(name, light_type); data.energy = operation.get('energy', 1000); data.color = operation.get('color', (1,1,1))[:3]
+            if light_type == 'AREA': data.shape = 'DISK'; data.size = operation.get('size', 5)
+            obj = bpy.data.objects.new(name, data); (target or bpy.context.scene.collection).objects.link(obj)
+            obj.location = operation.get('location', (0,0,5)); obj.rotation_euler = operation.get('rotation', (0,0,0))
+        elif kind == 'camera': obj = scene_helpers.camera(name, operation.get('location', (10,-10,8)), operation.get('target', (0,0,0)), operation.get('lens', 45))
+        elif kind == 'world': obj = scene_helpers.world(operation.get('color', (.05,.05,.05,1)), operation.get('strength', .5))
+        elif kind == 'assign_material':
+            obj = bpy.data.objects.get(operation.get('object', ''))
+            if not obj or not material: raise ValueError(f'operation {index}: object and material must exist')
+            scene_helpers.assign(obj, material)
+        elif kind == 'transform':
+            obj = bpy.data.objects.get(operation.get('object', ''))
+            if not obj: raise ValueError(f'operation {index}: object does not exist')
+            if 'location' in operation: obj.location = operation['location']
+            if 'rotation' in operation: obj.rotation_euler = operation['rotation']
+            if 'scale' in operation: obj.scale = operation['scale']
+            if 'dimensions' in operation: obj.dimensions = operation['dimensions']
+        elif kind == 'parent':
+            obj = bpy.data.objects.get(operation.get('object', '')); parent = bpy.data.objects.get(operation.get('parent', ''))
+            if not obj or not parent: raise ValueError(f'operation {index}: object and parent must exist')
+            world = obj.matrix_world.copy(); obj.parent = parent; obj.matrix_world = world
+        elif kind == 'duplicate':
+            source = bpy.data.objects.get(operation.get('source', ''))
+            if not source: raise ValueError(f'operation {index}: source does not exist')
+            obj = source.copy(); obj.data = source.data.copy() if source.data else None; obj.name = name
+            (target or bpy.context.scene.collection).objects.link(obj)
+            if 'location' in operation: obj.location = operation['location']
+        elif kind == 'delete':
+            obj = bpy.data.objects.get(operation.get('object', name))
+            if not obj: raise ValueError(f'operation {index}: object does not exist')
+            bpy.data.objects.remove(obj, do_unlink=True); obj = None
+        elif kind == 'modifier':
+            obj = bpy.data.objects.get(operation.get('object', ''))
+            if not obj: raise ValueError(f'operation {index}: object does not exist')
+            obj.modifiers.new(name, operation.get('modifier_type', 'BEVEL'))
+        elif kind == 'keyframe':
+            obj = bpy.data.objects.get(operation.get('object', ''))
+            if not obj: raise ValueError(f'operation {index}: object does not exist')
+            obj.keyframe_insert(data_path=operation.get('data_path', 'location'), frame=operation.get('frame', bpy.context.scene.frame_current))
+        else: raise ValueError(f'operation {index}: unsupported type {kind!r}')
+        if obj is not None and hasattr(obj, 'rotation_euler'):
+            if 'rotation' in operation and kind not in {'transform'}: obj.rotation_euler = operation['rotation']
+            if 'scale' in operation and kind not in {'transform'}: obj.scale = operation['scale']
+        if hasattr(obj, 'name') and kind not in {'material','world','assign_material','transform','parent','modifier','keyframe'}: created.append(obj.name)
     restore_viewport_state()
-    return {'executed':True,'label':label,'operations':len(operations),'created':created,'materials':materials}
+    return {'executed': True, 'label': label, 'operations': len(operations), 'created': created, 'materials': materials}
 
 
 # ── Viewport capture ──────────────────────────────────────────────────────────
@@ -508,7 +667,7 @@ def screenshot(root, context=None, max_dimension=512):
     r = scene.render
     old = (r.filepath, r.resolution_x, r.resolution_y,
            r.resolution_percentage, r.image_settings.file_format)
-    path = Path(root) / 'sketch_viewport.png'
+    path = workspace_root(root) / 'sketch_viewport.png'
     try:
         max_dim = max(128, min(1920, int(max_dimension)))
         rw, rh = max(1, region.width), max(1, region.height)
@@ -579,6 +738,8 @@ def run(root, job):
         return import_cached(root, **args)
     if action == 'inspect':
         return inspect_scene(**args)
+    if action == 'inspect_data':
+        return inspect_blender_data(**args)
     if action == 'get_scene_info':
         return get_scene_info()
     if action == 'get_object_info':
@@ -599,7 +760,7 @@ def run(root, job):
         return screenshot(root, **args)
     if action == 'capture_focused_view':
         from . import focused_view
-        return focused_view.capture(root, **args)
+        return focused_view.capture(workspace_root(root), **args)
     if action == 'clear_data':
         return clear_stored_data(root, **args)
     if action in ('mesh_edit', 'validate_selection'):
@@ -609,49 +770,18 @@ def run(root, job):
 
 
 def clear_stored_data(root, include_assets=False):
-    """Clean all stored operational data, checkpoints, logs, and jobs from the runtime directory."""
-    root_path = Path(root).resolve()
-    if not root_path.exists():
-        return {'cleared': True, 'root': str(root_path)}
-
-    subdirs = ['blender_jobs', 'agent_runs', 'scene_versions', 'conversations', 'restored_scenes', 'focused_views', 'selection_views']
+    """Clear data belonging to the current scene while preserving other scene workspaces."""
+    base = Path(root).resolve()
+    current = workspace_root(base)
+    identity = workspace_id()
+    if current.is_dir():
+        shutil.rmtree(current, ignore_errors=True)
+    current.mkdir(parents=True, exist_ok=True)
+    (current / 'workspace.json').write_text(json.dumps({
+        'workspace_id': identity, 'scene_name': bpy.context.scene.name,
+        'blend_file': bpy.data.filepath or None}, indent=2), encoding='utf-8')
     if include_assets:
-        subdirs.append('assets')
-
-    for name in subdirs:
-        target = root_path / name
-        if target.is_dir():
-            try:
-                shutil.rmtree(target, ignore_errors=True)
-                target.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
-
-    for audit_name in ('audit.jsonl', 'audit.previous.jsonl'):
-        audit = root_path / audit_name
-        try:
-            if audit.exists():
-                with audit.open('w', encoding='utf-8') as f:
-                    f.truncate(0)
-        except OSError:
-            pass
-
-    for sketch_file in root_path.glob('sketch_viewport.*'):
-        try:
-            sketch_file.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    db_path = root_path / 'projects.sqlite3'
-    if db_path.exists():
-        try:
-            import sqlite3
-            con = sqlite3.connect(db_path, timeout=1.0)
-            con.executescript('DELETE FROM revisions; DELETE FROM plans; DELETE FROM operations; VACUUM;')
-            con.commit()
-            con.close()
-        except Exception:
-            pass
-
-    return {'cleared': True, 'root': str(root_path)}
-
+        assets = base / 'assets'
+        if assets.is_dir(): shutil.rmtree(assets, ignore_errors=True)
+        assets.mkdir(parents=True, exist_ok=True)
+    return {'cleared': True, 'root': str(current), 'workspace_id': identity}

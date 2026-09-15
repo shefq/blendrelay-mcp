@@ -18,14 +18,14 @@ assert bpy.context.scene.archforge_allow_antigravity_mcp is True
 assert bpy.context.scene.archforge_unattended_agent_permissions is True
 batch=general.build_batch([
     {'type':'collection','name':'Batch Scene'},
-    {'type':'material','name':'Batch Stone','color':[.4,.3,.2,1],'roughness':.8},
-    {'type':'cube','name':'Batch Building','collection':'Batch Scene','dimensions':[4,3,5],'material':'Batch Stone','bevel':.1},
+    {'type':'material','name':'Batch Material','color':[.4,.3,.2,1],'roughness':.8},
+    {'type':'cube','name':'Batch Object','collection':'Batch Scene','dimensions':[4,3,5],'material':'Batch Material','bevel':.1},
     {'type':'camera','name':'Batch Camera','location':[8,-8,6],'target':[0,0,1]},
-    {'type':'area_light','name':'Batch Sun Fill','location':[2,-3,8],'energy':800},
+    {'type':'area_light','name':'Batch Key Light','location':[2,-3,8],'energy':800},
 ])
-assert batch['executed'] and 'Batch Building' in batch['created']
-assert bpy.data.objects['Batch Building'].data.materials[0].name=='Batch Stone'
-assert bpy.data.objects['Batch Building'].name in bpy.data.collections['Batch Scene'].objects
+assert batch['executed'] and 'Batch Object' in batch['created']
+assert bpy.data.objects['Batch Object'].data.materials[0].name=='Batch Material'
+assert bpy.data.objects['Batch Object'].name in bpy.data.collections['Batch Scene'].objects
 helper_result=general.execute_code("af.cube('Helper Cube', location=(6,0,1), dimensions=(1,1,2)); result='ok'")
 assert helper_result['executed'] and helper_result['result']=='ok'
 assert helper_result['progress']['created_object_count']==1

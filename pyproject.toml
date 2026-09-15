@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "archforge-mcp"
 dynamic = ["version"]
-description = "Local architectural modeling tools and a procedural Blender extension"
+description = "General-purpose local MCP tools and an AI workflow extension for Blender"
 requires-python = ">=3.11"
 readme = "README.md"
 license = {text = "MIT AND GPL-3.0-or-later"}

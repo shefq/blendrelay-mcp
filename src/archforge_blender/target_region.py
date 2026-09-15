@@ -49,7 +49,7 @@ def payload(context):
                 selected_objects=[o.name for o in context.selected_objects if not o.get(TAG)],
                 overlapping_bounds=intersecting,
                 instructions='Use this oriented box as the spatial target for the user request. '
-                'It is a guide, not house geometry. Keep the guide intact. Preserve objects outside '
+                'It is a guide, not generated geometry. Keep the guide intact. Preserve objects outside '
                 'the region unless the user explicitly requests changes there. Overlapping bounds '
                 'are candidates, not proof of mesh intersection. Fit new geometry to this volume; '
                 'for edits, inspect candidate objects and modify only the requested portion.')

@@ -4,7 +4,7 @@ import os
 import socket
 import struct
 from pathlib import Path
-from archforge_domain.model import DomainError, canonical
+from archforge_runtime.errors import DomainError, canonical
 
 MAX_FRAME=1024*1024
 

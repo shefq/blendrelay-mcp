@@ -2,7 +2,7 @@ import tempfile
 import time
 import unittest
 from archforge_runtime.service import Service
-from archforge_domain.model import DomainError
+from archforge_runtime.errors import DomainError
 
 
 class GeneralBridgeTests(unittest.TestCase):

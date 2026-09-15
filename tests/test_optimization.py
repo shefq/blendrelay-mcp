@@ -67,10 +67,12 @@ class OptimizationTests(unittest.TestCase):
         self.assertEqual(len(c['adjacent_vertices']),1)
         self.assertEqual(c['vertices'][0]['local'],[.123457])
         self.assertEqual(choose('AUTO','Bevel these edges',True),'EDIT')
-        self.assertEqual(choose('AUTO','Build a house',True),'BUILD')
+        self.assertEqual(choose('AUTO','Create a complete character',True),'CREATE')
+        self.assertEqual(choose('AUTO','Rig this selected character',True),'RIGGING')
+        self.assertEqual(choose('AUTO','Add cloth simulation',False),'SIMULATION')
 
     def test_workflow_instructions_include_call_controls(self):
-        text=instructions('EDIT','instance',False,False,True,4,1,0)
+        text=instructions('EDIT','instance','EDIT_CURVE',False,True,4,1,0)
         self.assertIn('starting allowance is 4 MCP calls and 1 accepted edits',text)
         self.assertIn('up to 0 times',text)
         self.assertIn('does not consume an edit',text)
@@ -87,13 +89,13 @@ class OptimizationTests(unittest.TestCase):
 
     def test_complex_maximum_instructions_are_quality_driven(self):
         limits=profile('COMPLEX_SCENE','MAXIMUM')
-        text=instructions('BUILD','instance',False,True,False,
+        text=instructions('CREATE','instance',None,True,False,
             limits['initial_calls'],limits['initial_edits'],limits['polls_per_job'],
             'COMPLEX_SCENE','MAXIMUM',limits['verification_passes'],True)
-        self.assertIn('complex production scene',text)
-        self.assertIn('execute_blender_python is the primary creation tool',text)
-        self.assertIn('It expands\nautomatically',text)
-        self.assertIn('at least 4 useful viewport',text)
+        self.assertIn('Task category=CREATE',text)
+        self.assertIn('execute_blender_python freely',text)
+        self.assertIn('It expands automatically',text)
+        self.assertIn('at least 4 useful view group',text)
         self.assertIn('Autonomous generation',text)
 
     def test_metrics_count_completed_once(self):

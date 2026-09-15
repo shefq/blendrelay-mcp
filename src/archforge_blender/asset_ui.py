@@ -34,7 +34,8 @@ def poll_fields(scene):
     quality=getattr(scene,'archforge_output_quality','HIGH')
     limits=workflow.profile(mode,quality)
     autonomous=getattr(scene,'archforge_permission_mode','AUTONOMOUS')=='AUTONOMOUS'
-    return dict(asset_policy=asdict(policy(scene)),asset_scene=scene_key(scene),
+    from .general import workspace_id
+    return dict(asset_policy=asdict(policy(scene)),asset_scene=scene_key(scene),workspace_id=workspace_id(scene, getattr(scene, 'archforge_runtime_dir', None)),
                 allow_python_execution=autonomous or bool(getattr(scene,'archforge_allow_python_execution',True)),
                 agent_run_id=run_id,
                 mcp_call_limit=limits['initial_calls'],edit_attempt_limit=limits['initial_edits'],

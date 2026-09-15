@@ -1,103 +1,110 @@
-"""Live Edit Mode selection context and execution-mode preservation."""
+"""Capture general Blender mode and selection context and restore interaction state."""
 import bpy
 import bmesh
 from .workflow import compact
 
 
-RULES = '''
-EDIT MODE WORKFLOW:
-The mesh_edit context describes live selected mesh elements, not whole-object selection.
-Use import bmesh; bm = bmesh.from_edit_mesh(obj.data) for each object in Edit Mode.
-Do not free that BMesh. Use bmesh.update_edit_mesh(obj.data) after changes.
-Selected indices are a snapshot: verify current selection before editing and refresh after
-topology changes. Never reuse stale indices. If truncated, inspect the live BMesh for the
-complete selection; do not treat the sample as the entire target.
-Keep changes on selected geometry by default. Shared boundary vertices affect adjacent
-faces; preserve surrounding shape and only change connections necessary for the request.
-When only_selected is true, do not modify unrelated elements or objects; read adjacent
-geometry as needed to maintain connectivity. Do not replace the entire mesh or object.
-Use local coordinates with matrix_world for world-space measurements. For nonuniform
-scale, transform normals with the inverse-transpose and account for scene unit scale.
-Remain in Edit Mode, preserve the mesh selection mode and keep resulting edited elements
-selected where possible. Do not switch to Object Mode unless an operation requires it;
-return to Edit Mode afterward. Keep overlays and selection highlighting enabled.
-'''
+RULES = """
+MODE-AWARE WORKFLOW:
+The edit_context describes the Blender mode and the current component, bone, stroke or object selection when Blender exposes it.
+Use the native Blender data API appropriate for that mode. Treat sampled indices as temporary and refresh live data after topology changes.
+When only_selected is true, limit changes to the selected target and dependencies required for a correct result.
+Preserve surrounding data, active object, selection, mode and viewport highlighting where possible.
+For mesh Edit Mode use bmesh.from_edit_mesh and never free its live BMesh. Call bmesh.update_edit_mesh after changes.
+Use matrix_world for world-space measurements and account for scene unit scale and nonuniform transforms.
+"""
+
+
+def _base(context):
+    active = context.active_object
+    return dict(mode=context.mode, active_object=active.name if active else None,
+                active_type=active.type if active else None,
+                meters_per_blender_unit=context.scene.unit_settings.scale_length,
+                units=context.scene.unit_settings.system,
+                selected_objects=[obj.name for obj in context.selected_objects[:100]],
+                selected_count=0, objects=[])
 
 
 def capture(context, limit=256):
-    if context.mode != 'EDIT_MESH':
+    if context.mode == 'OBJECT':
         return None
-    result = dict(mode=context.mode, selection_modes=[n for n, yes in
-        zip(('VERT', 'EDGE', 'FACE'), context.tool_settings.mesh_select_mode) if yes],
-        active_object=context.active_object.name if context.active_object else None,
-        meters_per_blender_unit=context.scene.unit_settings.scale_length,
-        units=context.scene.unit_settings.system, objects=[], selected_count=0)
-    for obj in context.objects_in_mode_unique_data:
-        if obj.type != 'MESH':
-            continue
-        bm = bmesh.from_edit_mesh(obj.data)
-        bm.normal_update()
-        for seq in (bm.verts, bm.edges, bm.faces):
-            seq.ensure_lookup_table()
-            seq.index_update()
-        verts = [v for v in bm.verts if v.select and not v.hide]
-        edges = [e for e in bm.edges if e.select and not e.hide]
-        faces = [f for f in bm.faces if f.select and not f.hide]
-        counts = dict(vertices=len(verts), edges=len(edges), faces=len(faces))
-        result['selected_count'] += sum(counts.values())
-        neighbors = {v for e in edges[:limit] for v in e.verts}
-        neighbors.update(v for f in faces[:limit] for v in f.verts)
-        neighbors.update(v for selected in verts[:limit] for e in selected.link_edges for v in e.verts)
-        normal_matrix = obj.matrix_world.to_3x3().inverted_safe().transposed()
-        result['objects'].append(dict(name=obj.name, mesh=obj.data.name,
-            materials=[slot.material.name if slot.material else None for slot in obj.material_slots],
-            matrix_world=[list(row) for row in obj.matrix_world], counts=counts,
-            truncated=any(n>limit for n in counts.values()),
-            adjacent_vertices_truncated=len(neighbors)>limit,
-            vertices=[dict(index=v.index, local=list(v.co), world=list(obj.matrix_world @ v.co)) for v in verts[:limit]],
-            edges=[dict(index=e.index, vertices=[v.index for v in e.verts]) for e in edges[:limit]],
-            faces=[dict(index=f.index, vertices=[v.index for v in f.verts],
-                        normal_local=list(f.normal), normal_world=list((normal_matrix @ f.normal).normalized()),
-                        material_index=f.material_index) for f in faces[:limit]],
-            adjacent_vertices=[dict(index=v.index, local=list(v.co)) for v in sorted(neighbors,key=lambda v:v.index)[:limit]],
-            active_face=bm.faces.active.index if bm.faces.active else None))
+    result = _base(context)
+    if context.mode == 'EDIT_MESH':
+        result['selection_modes'] = [name for name, enabled in
+            zip(('VERT', 'EDGE', 'FACE'), context.tool_settings.mesh_select_mode) if enabled]
+        for obj in context.objects_in_mode_unique_data:
+            if obj.type != 'MESH': continue
+            bm = bmesh.from_edit_mesh(obj.data); bm.normal_update()
+            for sequence in (bm.verts, bm.edges, bm.faces): sequence.ensure_lookup_table(); sequence.index_update()
+            verts = [v for v in bm.verts if v.select and not v.hide]
+            edges = [e for e in bm.edges if e.select and not e.hide]
+            faces = [f for f in bm.faces if f.select and not f.hide]
+            counts = dict(vertices=len(verts), edges=len(edges), faces=len(faces))
+            result['selected_count'] += sum(counts.values())
+            neighbors = {v for edge in edges[:limit] for v in edge.verts}
+            neighbors.update(v for face in faces[:limit] for v in face.verts)
+            normal_matrix = obj.matrix_world.to_3x3().inverted_safe().transposed()
+            result['objects'].append(dict(name=obj.name, data=obj.data.name, counts=counts,
+                matrix_world=[list(row) for row in obj.matrix_world], truncated=any(value > limit for value in counts.values()),
+                vertices=[dict(index=v.index, local=list(v.co), world=list(obj.matrix_world @ v.co)) for v in verts[:limit]],
+                edges=[dict(index=e.index, vertices=[v.index for v in e.verts]) for e in edges[:limit]],
+                faces=[dict(index=f.index, vertices=[v.index for v in f.verts], normal_local=list(f.normal),
+                            normal_world=list((normal_matrix @ f.normal).normalized()), material_index=f.material_index)
+                       for f in faces[:limit]],
+                adjacent_vertices=[dict(index=v.index, local=list(v.co)) for v in sorted(neighbors, key=lambda item:item.index)[:limit]]))
+    elif context.mode == 'EDIT_ARMATURE' and context.active_object:
+        bones = [bone for bone in context.active_object.data.edit_bones if bone.select]
+        result['selected_count'] = len(bones)
+        result['bones'] = [dict(name=bone.name, head=list(bone.head), tail=list(bone.tail), roll=bone.roll,
+                                parent=bone.parent.name if bone.parent else None) for bone in bones[:limit]]
+    elif context.mode == 'POSE' and context.active_object:
+        bones = list(getattr(context, 'selected_pose_bones', None) or [])
+        result['selected_count'] = len(bones)
+        result['pose_bones'] = [dict(name=bone.name, parent=bone.parent.name if bone.parent else None,
+                                     constraints=[c.type for c in bone.constraints]) for bone in bones[:limit]]
+    elif context.mode in {'EDIT_CURVE', 'EDIT_SURFACE'} and context.active_object:
+        splines = []
+        for spline_index, spline in enumerate(context.active_object.data.splines):
+            bezier = [index for index, point in enumerate(spline.bezier_points)
+                      if point.select_control_point or point.select_left_handle or point.select_right_handle]
+            points = [index for index, point in enumerate(spline.points) if point.select]
+            if bezier or points: splines.append({'spline': spline_index, 'type': spline.type, 'bezier_points': bezier[:limit], 'points': points[:limit]})
+        result['selected_count'] = sum(len(item['bezier_points']) + len(item['points']) for item in splines)
+        result['splines'] = splines[:limit]
+    elif context.mode == 'EDIT_LATTICE' and context.active_object:
+        selected = [index for index, point in enumerate(context.active_object.data.points) if point.select]
+        result['selected_count'] = len(selected); result['points'] = selected[:limit]
+    else:
+        # Sculpt, paint, Grease Pencil and other modes expose enough high-level state for
+        # generated Blender Python to inspect the exact mode-specific data live.
+        result['selected_count'] = len(context.selected_objects)
     return compact(result)
 
 
 def remember():
-    ctx = bpy.context
-    return dict(mode=ctx.mode, active=ctx.view_layer.objects.active,
-                objects=list(ctx.objects_in_mode) if ctx.mode == 'EDIT_MESH' else [],
-                selection_mode=tuple(ctx.tool_settings.mesh_select_mode))
+    context = bpy.context
+    return dict(mode=context.mode, active=context.view_layer.objects.active,
+                selected=list(context.selected_objects),
+                objects_in_mode=list(getattr(context, 'objects_in_mode', ()) or ()),
+                mesh_selection_mode=tuple(context.tool_settings.mesh_select_mode))
 
 
 def restore(state):
-    if not state:
-        return
-    ctx = bpy.context
-    if state['mode'] == 'OBJECT':
-        if ctx.mode != 'OBJECT' and bpy.ops.object.mode_set.poll():
-            bpy.ops.object.mode_set(mode='OBJECT')
-        return
-    if state['mode'] != 'EDIT_MESH':
-        return
-    # Preserve surviving BMesh selection; do not reapply old indices after topology edits.
-    valid = []
-    for obj in state['objects']:
-        try:
-            if obj.name in ctx.view_layer.objects:
-                valid.append(obj)
-        except ReferenceError:
-            continue
-    if not valid:
-        return
-    if ctx.mode != 'EDIT_MESH' or set(ctx.objects_in_mode) != set(valid):
-        if ctx.mode != 'OBJECT' and bpy.ops.object.mode_set.poll():
-            bpy.ops.object.mode_set(mode='OBJECT')
-        for obj in ctx.selected_objects:
-            obj.select_set(False)
-        for obj in valid:
-            obj.select_set(True)
-        ctx.view_layer.objects.active = state['active'] if state['active'] in valid else valid[0]
-        bpy.ops.object.mode_set(mode='EDIT')
-    ctx.tool_settings.mesh_select_mode = state['selection_mode']
+    if not state: return
+    context = bpy.context
+    desired = state['mode']
+    valid = [obj for obj in state['selected'] if obj and obj.name in context.view_layer.objects]
+    active = state['active'] if state['active'] and state['active'].name in context.view_layer.objects else (valid[0] if valid else None)
+    if context.mode != 'OBJECT' and bpy.ops.object.mode_set.poll(): bpy.ops.object.mode_set(mode='OBJECT')
+    for obj in context.selected_objects: obj.select_set(False)
+    for obj in valid: obj.select_set(True)
+    if active: context.view_layer.objects.active = active
+    mode_map = {'EDIT_MESH':'EDIT', 'EDIT_CURVE':'EDIT', 'EDIT_SURFACE':'EDIT', 'EDIT_TEXT':'EDIT',
+                'EDIT_ARMATURE':'EDIT', 'EDIT_METABALL':'EDIT', 'EDIT_LATTICE':'EDIT',
+                'EDIT_GREASE_PENCIL':'EDIT', 'POSE':'POSE', 'SCULPT':'SCULPT',
+                'PAINT_WEIGHT':'WEIGHT_PAINT', 'PAINT_VERTEX':'VERTEX_PAINT', 'PAINT_TEXTURE':'TEXTURE_PAINT'}
+    target = mode_map.get(desired)
+    if target and active and bpy.ops.object.mode_set.poll():
+        try: bpy.ops.object.mode_set(mode=target)
+        except RuntimeError: pass
+    if desired == 'EDIT_MESH': context.tool_settings.mesh_select_mode = state['mesh_selection_mode']

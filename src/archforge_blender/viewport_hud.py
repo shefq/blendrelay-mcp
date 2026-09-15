@@ -2,7 +2,7 @@
 """Modern Viewport Floating AI Command HUD for ArchForge.
 
 Rendered at 60 FPS in 3D Viewport 2D screen space via Blender's GPU & BLF modules.
-Designed with a unique Cyber-Architectural dark obsidian chassis and electric cyan accents.
+Designed with a unique dark obsidian interface and electric cyan accents.
 Features full interactive drag-to-resize (left/right edges & corner grip), titlebar drag-to-move,
 scale zoom buttons (+/-), Ctrl+Wheel zoom, and rock-solid click hit-testing.
 """
@@ -18,7 +18,7 @@ from gpu_extras.batch import batch_for_shader
 
 PRESETS = [
     'with realistic PBR materials and cinematic lighting',
-    'modern architectural glass pavilion aesthetic',
+    'polished hard-surface product with a clear silhouette',
     'cyberpunk neon detailing with metallic shaders',
     'clean minimalist low-poly geometric style',
     'add bevel modifiers on sharp mesh edges',

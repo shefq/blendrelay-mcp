@@ -1,9 +1,9 @@
-"""General Blender jobs, independent of architectural schemas."""
+"""General Blender jobs and durable operation receipts."""
 import hashlib
 import json
 import re
 import time
-from archforge_domain.model import DomainError
+from archforge_runtime.errors import DomainError
 from archforge_blender.version import VERSION
 
 LIVE_SESSION_SECONDS = 90
@@ -56,7 +56,7 @@ class Bridge:
                 for k,s in self.blender_sessions.items() if time.monotonic()-s['seen'] < LIVE_SESSION_SECONDS]
 
     def rpc_blender_poll(self, instance_id, scene_name='', filepath='', selection=None, version=VERSION,
-                         asset_policy=None, asset_scene=None, allow_python_execution=None,
+                         asset_policy=None, asset_scene=None, workspace_id=None, allow_python_execution=None,
                          agent_run_id=None, mcp_call_limit=40, edit_attempt_limit=10, job_poll_limit=20,
                          max_mcp_calls=120, max_edit_attempts=30, auto_extend=True, **kwargs):
         if not isinstance(instance_id, str) or not instance_id:
@@ -65,7 +65,7 @@ class Bridge:
         same_run=bool(agent_run_id and previous.get('agent_run_id')==agent_run_id)
         self.blender_sessions[instance_id] = dict(seen=time.monotonic(), scene_name=scene_name,
                                                  filepath=filepath, selection=selection or [], version=version,
-                                                 asset_policy=asset_policy, asset_scene=asset_scene,
+                                                 asset_policy=asset_policy, asset_scene=asset_scene, workspace_id=workspace_id,
                                                  allow_python_execution=(previous.get('allow_python_execution',False)
                                                      if allow_python_execution is None else bool(allow_python_execution)),
                                                  agent_run_id=agent_run_id,
@@ -134,7 +134,7 @@ class Bridge:
 
     def rpc_blender_submit(self, operation_id=None, action=None, arguments=None, instance_id=None):
         self._cleanup_jobs()
-        if action not in ('inspect','execute','execute_code','build_batch','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot','capture_focused_view','mesh_edit','validate_selection'):
+        if action not in ('inspect','inspect_data','execute','execute_code','build_batch','get_scene_info','get_object_info','versions','checkpoint','restore','screenshot','capture_focused_view','mesh_edit','validate_selection'):
             raise DomainError('UNKNOWN_ACTION',action)
         # Auto-generate a unique operation_id if not supplied
         if not operation_id:

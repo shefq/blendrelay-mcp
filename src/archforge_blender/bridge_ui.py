@@ -21,7 +21,7 @@ from . import asset_ui
 STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
            codex_process=None,codex_output=None,codex_log=None,codex_started=0,
            agent_process=None,agent_output=None,agent_log=None,agent_backend='ANTIGRAVITY',agent_model='',agent_started=0,
-           active_agent_run_id=None,agent_job_errors=[],agent_expected_edit=False,agent_successful_edits=0,
+           active_agent_run_id=None,agent_job_errors=[],agent_expected_edit=False,agent_successful_edits=0,workspace_id=None,
            agent_verify_after=False,agent_is_verification=False,agent_original_request='')
 
 
@@ -31,7 +31,56 @@ def redraw():
             if area.type=='VIEW_3D':area.tag_redraw()
 
 
+def disable_windows_quickedit():
+    """Prevent Windows console from freezing Blender when clicked."""
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        GENERIC_READ = 0x80000000
+        GENERIC_WRITE = 0x40000000
+        FILE_SHARE_READ = 1
+        FILE_SHARE_WRITE = 2
+        OPEN_EXISTING = 3
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+
+        h_conin = kernel32.CreateFileW(
+            'CONIN$',
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            0,
+            None,
+        )
+        if h_conin != -1 and h_conin != 0:
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(h_conin, ctypes.byref(mode)):
+                new_mode = (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+                kernel32.SetConsoleMode(h_conin, new_mode)
+            kernel32.CloseHandle(h_conin)
+    except Exception:
+        pass
+
+
+def sync_workspace_state(scene=None):
+    scene = scene or bpy.context.scene
+    root = STATE['root'] or getattr(scene, 'archforge_runtime_dir', default_root())
+    path = general.workspace_root(root, scene)
+    identity = general.workspace_id(scene, root)
+    if STATE.get('workspace_id') != identity:
+        STATE['workspace_id'] = identity
+        STATE['versions'] = []
+        STATE['sketch_viewport'] = None
+    return path
+
+
 def refresh_versions():
+    sync_workspace_state()
     STATE['versions']=general.versions(STATE['root'] or default_root());redraw()
 
 
@@ -160,7 +209,7 @@ def refresh_models_async():
 
 
 def agent_paths(root, run_id):
-    folder = Path(root) / 'agent_runs'
+    folder = general.workspace_root(root) / 'agent_runs'
     folder.mkdir(parents=True, exist_ok=True)
     return folder / (run_id + '.log'), folder / (run_id + '.final.txt')
 
@@ -250,7 +299,7 @@ def capture_selection_views(root, run_id, selected_objects, angles=(35.0, 155.0,
     target = (minimum + maximum) * 0.5
     radius = max((maximum - minimum).length * 0.5, 0.5)
     distance = max(radius * 3.0, 2.0)
-    output_dir = Path(root) / 'selection_views'
+    output_dir = general.workspace_root(root) / 'selection_views'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     scene = bpy.context.scene
@@ -475,6 +524,7 @@ def run_agent_reader(process, log_path, agent_name, final_path, conversation_pat
 
 
 def start_agent(context, prompt_override=None, use_region=False, verification_pass=False):
+    disable_windows_quickedit()
     active_proc = STATE.get('agent_process') or STATE.get('codex_process')
     if active_proc and active_proc.poll() is None:
         agent_name = 'Antigravity' if STATE.get('agent_backend') == 'ANTIGRAVITY' else 'Codex'
@@ -486,11 +536,9 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
         raise RuntimeError(f'Enter a prompt for {agent_name}')
     autonomous = getattr(context.scene, 'archforge_permission_mode', 'AUTONOMOUS') == 'AUTONOMOUS'
 
-    mesh_edit = edit_context.capture(context)
-    if mesh_edit and not mesh_edit['selected_count']:
-        raise RuntimeError('Select vertices, edges or faces before sending an Edit Mode prompt.')
-    if context.mode.startswith('EDIT_') and mesh_edit is None:
-        raise RuntimeError('Selection-aware prompts currently support mesh Edit Mode. Switch to Object Mode for this object type.')
+    sync_workspace_state(context.scene)
+    edit_state = edit_context.capture(context)
+    mesh_edit = edit_state if context.mode == 'EDIT_MESH' else None
 
     ensure_connected(context)
 
@@ -531,7 +579,8 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
     root = Path(STATE['root'] or context.scene.archforge_runtime_dir).resolve()
     if not context.scene.get('archforge_workspace_id'):
         context.scene['archforge_workspace_id'] = uuid.uuid4().hex
-    conversation_path = root / 'conversations' / (context.scene['archforge_workspace_id'] + '.json')
+    scene_root = general.workspace_root(root, context.scene)
+    conversation_path = scene_root / 'conversations' / 'state.json'
     resume_id = conversation.load(conversation_path).get(agent) if context.scene.archforge_continue_conversation else None
     sketch_data = sketch.payload(context.scene)
     sketch_viewport = STATE.get('sketch_viewport')
@@ -564,18 +613,18 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
     if only_selected and not context.selected_objects:
         raise RuntimeError('No objects selected. Select at least one object in the 3D Viewport or disable "Only selected objects".')
 
-    selected_objs = selection_context(context) if (mesh_edit or only_selected) else []
+    selected_objs = selection_context(context) if (edit_state or only_selected) else []
     selection_view_paths = []
     if context.selected_objects and not mesh_edit and only_selected:
         try:
-            selection_view_paths = capture_selection_views(root, run_id, context.selected_objects, angles=(35.0,) if workflow.choose(context.scene.archforge_task_mode, prompt, True) == 'EDIT' else (35.0,155.0,275.0))
+            selection_view_paths = capture_selection_views(root, run_id, context.selected_objects, angles=(35.0,) if not workflow.is_creation(workflow.choose(context.scene.archforge_task_mode, prompt, True, context.mode)) else (35.0,155.0,275.0))
         except Exception as error:
             STATE['status'] = f'Selected-object image capture unavailable: {error}'
-    if mesh_edit:
+    if edit_state:
         try:
             capture = general.screenshot(root, context=context)
             source = Path(capture['path'])
-            image = root / 'agent_runs' / (run_id + '-edit-selection' + source.suffix)
+            image = scene_root / 'agent_runs' / (run_id + '-edit-selection' + source.suffix)
             shutil.copyfile(source, image)
             selection_view_paths = [str(image)]
         except Exception as error:
@@ -601,21 +650,23 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
     }
     workdir = Path(bpy.data.filepath).parent if bpy.data.filepath else Path(root)
 
-    task_mode = workflow.choose(context.scene.archforge_task_mode, prompt, bool(context.selected_objects))
+    task_mode = workflow.choose(context.scene.archforge_task_mode, prompt, bool(context.selected_objects), context.mode)
     verification = context.scene.archforge_verification
     visual = verification == 'VISUAL' or (verification == 'AUTO' and auto_verify)
     system_instructions = workflow.instructions(
-        task_mode, STATE['instance'], bool(mesh_edit), visual, only_selected,
+        task_mode, STATE['instance'], context.mode if context.mode != 'OBJECT' else None, visual, only_selected,
         max_mcp_calls, max_edit_attempts, max_job_polls, resource_mode, output_quality,
         resource_profile['verification_passes'], autonomous,
     )
+    if edit_state:
+        system_instructions += '\n' + edit_context.RULES
     if region_data and use_region:
         system_instructions += '\n' + target_region.PROMPT_RULES
 
     # Compact context JSON (trim large arrays to avoid hitting CLI arg limits)
     compact_ctx = {
         'mode': context.mode,
-        'mesh_edit': mesh_edit,
+        'edit_context': edit_state,
         'scene': context_text['scene'],
         'blend_file': context_text['blend_file'],
         'instance_id': context_text['archforge_instance_id'],
@@ -652,7 +703,7 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
         try:
             need_opt = (ref_image_path.suffix.lower() not in ('.jpg', '.jpeg')) or (ref_image_path.stat().st_size > 1500000)
             if need_opt:
-                out_jpg = root / 'reference_vision.jpg'
+                out_jpg = scene_root / 'reference_vision.jpg'
                 b_img = bpy.data.images.load(str(ref_image_path), check_existing=False)
                 w, h = b_img.size
                 if max(w, h) > 1920:
@@ -694,7 +745,7 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
     # Passing large prompts inline causes silent truncation → model gets a broken
     # prompt and returns an empty response ("model output must contain either
     # output text or tool calls").
-    prompt_file = root / 'agent_runs' / f'{run_id}.prompt.txt'
+    prompt_file = scene_root / 'agent_runs' / f'{run_id}.prompt.txt'
     prompt_file.parent.mkdir(parents=True, exist_ok=True)
     prompt_file.write_text(full_instructions, encoding='utf-8')
 
@@ -1296,7 +1347,7 @@ class AF_OT_NewConversation(bpy.types.Operator):
         workspace = context.scene.get('archforge_workspace_id')
         if workspace:
             root = Path(STATE['root'] or context.scene.archforge_runtime_dir)
-            conversation.save(root / 'conversations' / (workspace + '.json'), context.scene.archforge_agent_backend, None)
+            conversation.save(general.workspace_root(root, context.scene) / 'conversations' / 'state.json', context.scene.archforge_agent_backend, None)
         self.report({'INFO'}, 'The next prompt will start a new conversation')
         return {'FINISHED'}
 
@@ -1312,8 +1363,8 @@ class AF_OT_ClearPrompt(bpy.types.Operator):
 
 class AF_OT_ClearStoredData(bpy.types.Operator):
     bl_idname = 'archforge.clear_stored_data'
-    bl_label = 'Clear All Stored Data'
-    bl_description = 'Clear all stored scene versions, generation logs, jobs, and audit history from the runtime folder'
+    bl_label = 'Clear Current Scene Data'
+    bl_description = 'Clear versions, prompts and generated images for the current Blender scene workspace'
     bl_options = {'REGISTER', 'UNDO'}
 
     include_assets: BoolProperty(
@@ -1328,13 +1379,12 @@ class AF_OT_ClearStoredData(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         col = layout.column()
-        col.label(text='Permanently delete stored data in runtime folder?', icon='QUESTION')
+        col.label(text='Permanently delete this scene workspace?', icon='QUESTION')
         box = col.box()
         box.label(text='• Scene version checkpoints & .blend snapshots', icon='RECOVER_LAST')
         box.label(text='• AI generation logs & prompts', icon='FILE_TEXT')
-        box.label(text='• Blender jobs & operation receipts', icon='PREFERENCES')
         box.label(text='• Viewport sketches & focused view images', icon='IMAGE_DATA')
-        box.label(text='• Audit history logs', icon='CONSOLE')
+        box.label(text='Other scene workspaces and runtime audit logs are preserved', icon='INFO')
         col.separator()
         col.prop(self, 'include_assets')
 
@@ -1345,7 +1395,7 @@ class AF_OT_ClearStoredData(bpy.types.Operator):
         conn = STATE.get('connection')
         if conn and hasattr(conn, 'request'):
             try:
-                conn.request('clear_data', {'include_assets': self.include_assets}, lambda res: None)
+                conn.request('clear_data', {'include_assets': self.include_assets, 'workspace_id': general.workspace_id(context.scene)}, lambda res: None)
             except Exception:
                 pass
 
@@ -1368,7 +1418,7 @@ class AF_OT_ClearStoredData(bpy.types.Operator):
         # 4. Refresh UI
         refresh_versions()
         redraw()
-        self.report({'INFO'}, 'All stored ArchForge data has been cleared.')
+        self.report({'INFO'}, 'Current scene workspace has been cleared.')
         return {'FINISHED'}
 
 
@@ -1700,12 +1750,16 @@ class AF_PT_Main(bpy.types.Panel):
             col_rt = runtime_box.column()
             col_rt.use_property_split = True
             col_rt.use_property_decorate = False
-            col_rt.prop(scene, 'archforge_runtime_dir', text='Data Directory')
+            col_rt.prop(scene, 'archforge_runtime_dir', text='Base Data Directory')
+            try:
+                col_rt.label(text='Scene: ' + str(general.workspace_root(scene.archforge_runtime_dir, scene).relative_to(Path(scene.archforge_runtime_dir))), icon='FILE_FOLDER')
+            except Exception:
+                pass
 
             runtime_box.separator(factor=0.5)
             row_clear = runtime_box.row(align=True)
             row_clear.scale_y = 1.25
-            row_clear.operator('archforge.clear_stored_data', text='Clear All Stored Data…', icon='TRASH')
+            row_clear.operator('archforge.clear_stored_data', text='Clear Current Scene Data…', icon='TRASH')
 
 
 CLASSES = (
@@ -1739,11 +1793,12 @@ CLASSES = (
 
 
 def register():
+    disable_windows_quickedit()
     asset_ui.register()
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.archforge_continue_conversation = BoolProperty(name='Continue conversation', description='Resume this workspace conversation with fresh scene context', default=False)
-    bpy.types.Scene.archforge_task_mode = EnumProperty(name='Workflow', items=[('AUTO','Auto','Choose based on selection and request'),('EDIT','Focused Edit','Targeted edits with corrections when needed'),('BUILD','Build','Larger scene work')],default='AUTO')
+    bpy.types.Scene.archforge_task_mode = EnumProperty(name='Workflow', items=[('AUTO','Auto','Detect the Blender workflow from mode, selection and request'),('EDIT','Focused Change','Targeted changes to current data'),('BUILD','Full Creation','Create a complete Blender result'),('ANIMATION','Animation','Animation, actions, timing and motion'),('RIGGING','Rigging','Armatures, skinning, constraints and poses'),('SHADING','Shading','Materials, textures and UV work'),('NODES','Nodes','Geometry Nodes, shader nodes or compositor graphs'),('SIMULATION','Simulation','Physics, particles, hair and cached effects'),('RENDERING','Rendering','Cameras, lighting, worlds and output'),('DATA','Data Management','Datablocks, collections, linking and cleanup')],default='AUTO')
     bpy.types.Scene.archforge_verification = EnumProperty(name='Verification',items=[('AUTO','Auto','Geometry checks and relevant visuals when Auto-Verify is enabled'),('GEOMETRY','Geometry','Geometry checks without final images'),('VISUAL','Geometry + Visual','Geometry checks and targeted visual verification')],default='AUTO')
     bpy.types.Scene.archforge_runtime_dir = StringProperty(name='Runtime', subtype='DIR_PATH', default=default_root())
     bpy.types.Scene.archforge_codex_prompt = StringProperty(name='Prompt', default='')

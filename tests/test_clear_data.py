@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 import bpy
 
 from archforge_blender import general
@@ -11,76 +12,72 @@ import archforge_blender
 
 class ClearDataTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        # Create mock data structure
-        (self.root / 'blender_jobs').mkdir(parents=True, exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(); self.root = Path(self.tmp.name)
+        self.scene = bpy.context.scene
+        self.old_workspace = self.scene.get('archforge_workspace_id')
+        self.scene['archforge_workspace_id'] = uuid.uuid4().hex
+        self.workspace = general.workspace_root(self.root, self.scene)
+        for name in ('agent_runs','scene_versions','conversations','focused_views','selection_views'):
+            folder = self.workspace / name; folder.mkdir(parents=True, exist_ok=True)
+            (folder / 'data.bin').write_bytes(b'data')
+        (self.workspace / 'sketch_viewport.jpg').write_bytes(b'data')
+        (self.root / 'blender_jobs').mkdir(exist_ok=True)
         (self.root / 'blender_jobs' / 'job1.json').write_text('{"status":"complete"}')
-        (self.root / 'agent_runs').mkdir(parents=True, exist_ok=True)
-        (self.root / 'agent_runs' / 'run1.log').write_text('agent log data')
-        (self.root / 'scene_versions').mkdir(parents=True, exist_ok=True)
-        (self.root / 'scene_versions' / 'v1.blend').write_text('blend file')
-        (self.root / 'conversations').mkdir(parents=True, exist_ok=True)
-        (self.root / 'conversations' / 'conv1.json').write_text('{}')
-        (self.root / 'focused_views').mkdir(parents=True, exist_ok=True)
-        (self.root / 'focused_views' / 'view1.jpg').write_text('jpg data')
-        (self.root / 'selection_views').mkdir(parents=True, exist_ok=True)
-        (self.root / 'selection_views' / 'sel1.jpg').write_text('jpg data')
-        (self.root / 'sketch_viewport.jpg').write_text('sketch data')
         (self.root / 'audit.jsonl').write_text('{"event":"test"}\n')
-        (self.root / 'audit.previous.jsonl').write_text('{"event":"old"}\n')
         (self.root / 'assets' / 'thumbnails').mkdir(parents=True, exist_ok=True)
-        (self.root / 'assets' / 'thumbnails' / 'thumb.png').write_text('thumb data')
+        (self.root / 'assets' / 'thumbnails' / 'thumb.png').write_bytes(b'data')
 
     def tearDown(self):
+        if self.old_workspace is None: self.scene.pop('archforge_workspace_id', None)
+        else: self.scene['archforge_workspace_id'] = self.old_workspace
         self.tmp.cleanup()
 
-    def test_general_clear_stored_data_preserves_assets_by_default(self):
-        result = general.clear_stored_data(self.root, include_assets=False)
-        self.assertTrue(result.get('cleared'))
-        self.assertEqual(list((self.root / 'blender_jobs').glob('*')), [])
-        self.assertEqual(list((self.root / 'agent_runs').glob('*')), [])
-        self.assertEqual(list((self.root / 'scene_versions').glob('*')), [])
-        self.assertEqual(list((self.root / 'conversations').glob('*')), [])
-        self.assertEqual(list((self.root / 'focused_views').glob('*')), [])
-        self.assertEqual(list((self.root / 'selection_views').glob('*')), [])
-        self.assertFalse((self.root / 'sketch_viewport.jpg').exists())
-        self.assertEqual((self.root / 'audit.jsonl').stat().st_size, 0)
-        self.assertEqual((self.root / 'audit.previous.jsonl').stat().st_size, 0)
-        # Assets should be preserved
-        self.assertTrue((self.root / 'assets' / 'thumbnails' / 'thumb.png').exists())
+    def test_workspace_identity_is_stable_and_isolated(self):
+        first = general.workspace_root(self.root, self.scene)
+        self.assertEqual(first, general.workspace_root(self.root, self.scene))
+        other = bpy.data.scenes.new('Independent Scene')
+        try:
+            second = general.workspace_root(self.root, other)
+            self.assertNotEqual(first, second)
+            self.assertTrue((first / 'workspace.json').is_file())
+            self.assertTrue((second / 'workspace.json').is_file())
+        finally: bpy.data.scenes.remove(other)
 
-    def test_general_clear_stored_data_clears_assets_when_requested(self):
-        result = general.clear_stored_data(self.root, include_assets=True)
-        self.assertTrue(result.get('cleared'))
+    def test_general_clear_only_current_workspace(self):
+        result = general.clear_stored_data(self.root, include_assets=False)
+        self.assertEqual(Path(result['root']), self.workspace)
+        self.assertEqual([p for p in self.workspace.rglob('*') if p.is_file() and p.name != 'workspace.json'], [])
+        self.assertTrue((self.root / 'blender_jobs' / 'job1.json').is_file())
+        self.assertTrue((self.root / 'audit.jsonl').is_file())
+        self.assertTrue((self.root / 'assets' / 'thumbnails' / 'thumb.png').is_file())
+
+    def test_general_clear_can_remove_shared_assets(self):
+        general.clear_stored_data(self.root, include_assets=True)
         self.assertEqual(list((self.root / 'assets').glob('*')), [])
 
-    def test_service_rpc_clear_data(self):
+    def test_service_can_clear_one_workspace(self):
         service = Service(self.root)
+        other = self.root / 'workspaces' / ('b' * 32)
+        other.mkdir(parents=True); (other / 'keep.txt').write_text('other scene')
         try:
-            service.rpc_blender_poll(instance_id='test-inst')
-            res = service.dispatch('clear_data', {'include_assets': True})
-            self.assertTrue(res.get('cleared'))
-            self.assertEqual(list((self.root / 'blender_jobs').glob('*')), [])
-            # Audit log only contains the clear_data operation itself
-            lines = (self.root / 'audit.jsonl').read_text().strip().splitlines()
-            self.assertEqual(len(lines), 1)
-            self.assertIn('clear_data', lines[0])
-        finally:
-            service.store.close()
+            result = service.dispatch('clear_data', {'workspace_id': self.scene['archforge_workspace_id']})
+            self.assertEqual(result['workspace_id'], self.scene['archforge_workspace_id'])
+            self.assertEqual(list(self.workspace.glob('*')), [])
+            self.assertTrue((other / 'keep.txt').is_file())
+            self.assertIn('clear_data', (self.root / 'audit.jsonl').read_text())
+        finally: service.store.close()
 
-    def test_blender_operator_clear_stored_data(self):
+    def test_blender_operator_clears_current_workspace(self):
         archforge_blender.register()
         try:
             bpy.context.scene.archforge_runtime_dir = str(self.root)
             from archforge_blender.bridge_ui import STATE
-            STATE['versions'] = [{'version_id': '123', 'label': 'Test'}]
-            STATE['agent_log'] = 'dummy.log'
+            STATE['root'] = str(self.root); STATE['workspace_id'] = self.scene['archforge_workspace_id']
+            STATE['versions'] = [{'version_id':'123','label':'Test'}]; STATE['agent_log'] = 'dummy.log'
+            self.assertEqual(bpy.ops.archforge.clear_stored_data(include_assets=False), {'FINISHED'})
+            self.assertEqual(STATE['versions'], []); self.assertIsNone(STATE['agent_log'])
+            self.assertTrue((self.root / 'blender_jobs' / 'job1.json').is_file())
+        finally: archforge_blender.unregister()
 
-            ret = bpy.ops.archforge.clear_stored_data(include_assets=False)
-            self.assertEqual(ret, {'FINISHED'})
-            self.assertEqual(STATE['versions'], [])
-            self.assertIsNone(STATE['agent_log'])
-            self.assertEqual(list((self.root / 'blender_jobs').glob('*')), [])
-        finally:
-            archforge_blender.unregister()
+
+if __name__ == '__main__': unittest.main()

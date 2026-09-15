@@ -9,7 +9,7 @@ from archforge_mcp.server import handle
 class ProtocolTests(unittest.TestCase):
     def test_fragmented_unicode_and_multiple_messages(self):
         a,b=socket.socketpair()
-        messages=[{'text':'房屋 — façade 🏡'},{'text':'second'}]
+        messages=[{'text':'角色 — 動畫 🎬'},{'text':'second'}]
         raw=b''.join(frame(m) for m in messages)
         def write():
             with a:
@@ -25,12 +25,13 @@ class ProtocolTests(unittest.TestCase):
         names={t['name'] for t in result['tools']}
         self.assertIn('execute_blender_python',names)
         self.assertIn('inspect_scene',names)
+        self.assertIn('inspect_blender_data', names)
         self.assertIn('mesh_edit',names)
         self.assertIn('capture_viewport',names)
         self.assertIn('capture_focused_view',names)
         self.assertIn('archforge_blender_sessions',names)
         self.assertTrue({'get_asset_policy','search_assets','import_asset','list_cached_assets','refresh_asset_cache','asset_job'} <= names)
-        self.assertNotIn('archforge_create_house',names)
+        self.assertNotIn('project_create', names)
         command=next(t for t in result['tools'] if t['name']=='execute_blender_python')
         self.assertTrue(command['annotations']['destructiveHint'])
         self.assertEqual(command['execution']['taskSupport'],'optional')

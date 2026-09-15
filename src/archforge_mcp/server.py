@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 
-from archforge_domain.model import DomainError
+from archforge_runtime.errors import DomainError
 from archforge_runtime.protocol import Client, data_dir
 from .job_results import wait_and_compact
 from .validation import SchemaError, validate
@@ -38,7 +38,7 @@ JOB_OUTPUT=obj({'operation_id':ID,'instance_id':ID,'action':STR,
     'status':{'enum':['queued','running','complete','failed','interrupted','cancelled']},
     'error':{},'result':{},'unchanged':BOOL,'next_step':STR},('operation_id','status'))
 SESSION_OUTPUT={'type':'array','items':obj({'instance_id':ID,'scene_name':STR,'filepath':STR,
-    'selection':{'type':'array','items':STR},'version':STR,'asset_policy':{},'asset_scene':{},
+    'selection':{'type':'array','items':STR},'version':STR,'workspace_id':{},'asset_policy':{},'asset_scene':{},
     'allow_python_execution':BOOL,'agent_run_id':{},'mcp_call_limit':{'type':'integer'},
     'edit_attempt_limit':{'type':'integer'},'job_poll_limit':{'type':'integer'},
     'max_mcp_calls':{'type':'integer'},'max_edit_attempts':{'type':'integer'},'auto_extend':BOOL,
@@ -50,9 +50,9 @@ POLICY_OUTPUT=obj({'poly_haven':BOOL,'poly_pizza':BOOL,'pizza_cc0':BOOL,'pizza_c
     'max_download_mb':{'type':'integer'},'local_cache':BOOL,'instance_id':ID},
     ('poly_haven','poly_pizza','pizza_cc0','pizza_cc_by','max_download_mb','local_cache','instance_id'))
 CAPABILITIES_OUTPUT=obj({'product':STR,'version':STR,'protocol_version':{'type':'integer'},'mcp_protocol':STR,
-    'schema_version':STR,'legacy_template_operations':{'type':'object'},'legacy_asset_families':{'type':'array'},
-    'general_blender':{'type':'object'},'legacy_template_limits':{'type':'object'},
-    'legacy_native_planner':STR,'image_workflow':STR},('product','version','mcp_protocol','general_blender'))
+    'schema_version':STR,'general_blender':{'type':'object'},
+    'workflows':{'type':'array','items':STR},'inspection_sections':{'type':'array','items':STR},
+    'image_workflow':STR},('product','version','mcp_protocol','general_blender'))
 SOURCE_OUTPUT=obj({'source_id':ID,'path':STR,'next_step':STR},('source_id','path','next_step'))
 ARTIFACT_OUTPUT=obj({'mime_type':STR,'offset':{'type':'integer'},'eof':BOOL,
     'total_bytes':{'type':'integer'}},('mime_type','offset','eof','total_bytes'))
@@ -69,6 +69,9 @@ def tool(name,title,method,description,properties=None,required=(),*,action=None
     TOOLS[name]=record
 
 tool('archforge_blender_sessions','Connected Blender Sessions','blender.sessions','List live Blender connections.',read=True,output=SESSION_OUTPUT)
+tool('inspect_blender_data','Inspect Blender Data','blender.submit','Inspect bounded Blender datablock summaries for non-mesh workflows.',
+     {**CONTROL,'data_type':{'enum':['objects','collections','materials','node_groups','actions','armatures','images','worlds','cameras','lights','scenes']},
+      'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':200}},('data_type',),action='inspect_data',read=True,output=JOB_OUTPUT,task=True)
 tool('inspect_scene','Inspect Blender Scene','blender.submit','Read compact scene or named-object information without changing Blender.',
      {**CONTROL,'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':200},
       'object_name':SHORT,'names':{'type':'array','items':SHORT,'maxItems':50}},action='inspect',read=True,output=JOB_OUTPUT,task=True)
@@ -101,8 +104,9 @@ tool('execute_blender_python','Execute Blender Python','blender.submit','Execute
      ('code',),action='execute',destructive=True,output=JOB_OUTPUT,task=True)
 tool('build_scene_batch','Build Scene Batch','blender.submit','Create common objects, materials, lights, cameras and world settings in one strict batch. Use Python for custom geometry.',
      {**CONTROL,'label':SHORT,'operations':{'type':'array','minItems':1,'maxItems':500,'items':obj({
-       'type':{'enum':['collection','material','cube','cylinder','area_light','camera','world','assign_material']},
-       'name':SHORT,'collection':SHORT,'location':VEC3,'dimensions':VEC3,'target':VEC3,'rotation':VEC3,
+       'type':{'enum':['collection','material','cube','cylinder','sphere','cone','plane','torus','empty','text','area_light','point_light','sun_light','camera','world','assign_material','transform','parent','duplicate','delete','modifier','keyframe']},
+       'name':SHORT,'collection':SHORT,'location':VEC3,'dimensions':VEC3,'target':VEC3,'rotation':VEC3,'scale':VEC3,
+       'source':SHORT,'parent':SHORT,'text':{'type':'string','maxLength':10000},'modifier_type':SHORT,'frame':{'type':'integer','minimum':-1048574,'maximum':1048574},'data_path':SHORT,
        'color':RGBA,'material':SHORT,'object':SHORT,'metallic':{'type':'number','minimum':0,'maximum':1},
        'roughness':{'type':'number','minimum':0,'maximum':1},'bevel':{'type':'number','minimum':0,'maximum':1000},
        'radius':{'type':'number','minimum':0.000001,'maximum':100000},'depth':{'type':'number','minimum':0.000001,'maximum':100000},
@@ -130,7 +134,7 @@ tool('list_cached_assets','List Cached Assets','assets.cached','List permitted a
 tool('refresh_asset_cache','Refresh Asset Cache','assets.refresh','Rescan cached asset metadata.',{'instance_id':ID},read=True,output=ASSET_JOB_OUTPUT,task=True)
 tool('asset_job','Read Asset Job','assets.job','Read an asynchronous asset job; respect its poll interval.',{'job_id':ID},('job_id',),read=True,output=ASSET_JOB_OUTPUT)
 tool('archforge_get_capabilities','ArchForge Capabilities','capabilities','Read runtime features and compatibility information.',read=True,output=CAPABILITIES_OUTPUT)
-tool('archforge_register_source','Register Reference Image','source.register','Copy a PNG or JPEG from an explicitly allowed source root into the artifact store.',
+tool('archforge_register_source','Register Reference Image','source.register','Copy a supported raster image from an explicitly allowed source root into the artifact store.',
      {'path':{'type':'string','minLength':1,'maxLength':32768}},('path',),destructive=True,output=SOURCE_OUTPUT)
 tool('archforge_read_artifact','Read ArchForge Artifact','artifact.read','Read a generated preview or registered image from the artifact store.',
      {'path':{'type':'string','minLength':1,'maxLength':32768}},('path',),read=True,output=ARTIFACT_OUTPUT)
