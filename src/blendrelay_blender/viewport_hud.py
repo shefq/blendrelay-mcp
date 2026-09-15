@@ -14,73 +14,6 @@ import blf
 import gpu
 from gpu_extras.batch import batch_for_shader
 
-# ── Preset Prompt Suggestions ───────────────────────────────────────────────
-
-PRESETS = [
-    'with realistic PBR materials and cinematic lighting',
-    'polished hard-surface product with a clear silhouette',
-    'cyberpunk neon detailing with metallic shaders',
-    'clean minimalist low-poly geometric style',
-    'add bevel modifiers on sharp mesh edges',
-    'centered at origin with clean subdivision topology',
-]
-
-def _get_model_list(agent):
-    from . import bridge_ui
-    return bridge_ui._MODEL_ITEMS[agent]
-
-
-def _get_selected_model(scene, agent):
-    from . import bridge_ui
-    return bridge_ui.selected_model(scene, agent)
-
-
-def _format_model_short(mid, mname):
-    """Format short concise name for the floating HUD chip."""
-    if not mid:
-        return 'Model'
-    if '3.8-flash' in mid:
-        return 'Flash 3.8' + (' Med' if 'med' in mid else (' Low' if 'low' in mid else ' High'))
-    if '3.7-flash' in mid:
-        return 'Flash 3.7'
-    if '3.6-flash' in mid:
-        return 'Flash 3.6'
-    if '3.1-pro' in mid:
-        return 'Pro 3.1'
-    if 'claude-sonnet' in mid:
-        return 'Sonnet 4.6'
-    if 'claude-opus' in mid:
-        return 'Opus 4.6'
-    if 'gpt-oss' in mid:
-        return 'GPT-OSS'
-    if 'gpt-6-astra' in mid or 'astra' in mid:
-        return 'GPT-6 Astra'
-    if 'gpt-6' in mid:
-        return 'GPT-6'
-    if 'gpt-5.6-sol' in mid or 'sol' in mid:
-        return 'GPT-5.6 Sol'
-    if 'gpt-5.6-terra' in mid or 'terra' in mid:
-        return 'GPT-5.6 Terra'
-    if 'gpt-5.6-luna' in mid or 'luna' in mid:
-        return 'GPT-5.6 Luna'
-    if 'gpt-5.6' in mid:
-        return 'GPT-5.6'
-    if 'gpt-5.5' in mid:
-        return 'GPT-5.5'
-    if 'gpt-5-mini' in mid:
-        return 'GPT-5 Mini'
-    if 'gpt-5' in mid:
-        return 'GPT-5'
-    if 'gpt-4o' in mid:
-        return 'GPT-4o'
-    if 'o3-mini' in mid:
-        return 'o3-mini'
-    if 'o3' in mid:
-        return 'o3'
-    if 'o1' in mid:
-        return 'o1'
-    return mname[:14]
-
 # ── Global HUD State ─────────────────────────────────────────────────────────
 
 HUD_STATE = {
@@ -94,7 +27,6 @@ HUD_STATE = {
     'drag_start_scale': 1.0,
     'drag_start_offset': (0.0, 0.0),
     'cursor_time': 0.0,
-    'preset_idx': 0,
     'bounds': {},
     'last_mouse': (0, 0),
     'flash_msg': '',
@@ -102,7 +34,7 @@ HUD_STATE = {
 }
 
 
-HUD_BASE_HEIGHT = 160.0
+HUD_BASE_HEIGHT = 122.0
 HUD_DESIGN_WIDTH = 780.0
 HUD_VIEWPORT_MARGIN = 24.0
 HUD_AUTO_WIDTH_FRACTION = 0.55
@@ -331,14 +263,7 @@ def draw_viewport_hud():
         return
 
     from . import bridge_ui
-    agent = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
-    agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
     is_running = bool(bridge_ui.STATE.get('agent_process') or bridge_ui.STATE.get('codex_process'))
-    only_selected = getattr(scene, 'blendrelay_only_selected', False)
-
-    # Dynamic model friendly name
-    cur_model = _get_selected_model(scene, agent)
-    model_label = _format_model_short(cur_model, cur_model) if cur_model else 'CLI default'
 
     rw = region.width
     rh = region.height
@@ -495,46 +420,47 @@ def draw_viewport_hud():
     _draw_text_centered("−", btn_zm_x, top_y, btn_z_w, top_h, size=12 * scale, color=(0.9, 0.95, 1.0, 1.0))
 
     # ── 3. Multi-line Prompt Field & Main Action Button ──────────────────────
-    mid_y = hud_y + 47.0 * scale
+    mid_y = hud_y + 12.0 * scale
     mid_h = 68.0 * scale
 
-    btn_w = 136.0 * scale
+    btn_w = 94.0 * scale
+    btn_h = 34.0 * scale
+    btn_y = mid_y + (mid_h - btn_h) / 2.0
     btn_x = hud_x + hud_w - btn_w - 14.0 * scale
-    bounds['btn_action'] = (btn_x, mid_y, btn_w, mid_h)
-    btn_hover = (hover == 'btn_action')
+    bounds['btn_action'] = (btn_x, btn_y, btn_w, btn_h)
 
     # Action Button: Run Agent (or Stop Task when running)
     prompt_x = hud_x + 14.0 * scale
     if is_running:
-        btn_w = 140.0 * scale
+        btn_w = 98.0 * scale
         btn_x = hud_x + hud_w - btn_w - 14.0 * scale
-        bounds['btn_action'] = (btn_x, mid_y, btn_w, mid_h)
+        bounds['btn_action'] = (btn_x, btn_y, btn_w, btn_h)
         pulse = 0.5 + 0.5 * math.sin(time.monotonic() * 6.0)
         c_fill = (0.88 + 0.12 * pulse, 0.22, 0.24, 1.0)
         _draw_rounded_box(
-            btn_x, mid_y, btn_w, mid_h, 10.0 * scale,
+            btn_x, btn_y, btn_w, btn_h, 10.0 * scale,
             fill_color=c_fill,
             border_color=(1.0, 0.4, 0.4, 0.9),
             border_width=max(1.0, 1.2 * scale),
         )
-        _draw_text_centered("✖ STOP TASK", btn_x, mid_y, btn_w, mid_h, size=12 * scale, color=(1.0, 1.0, 1.0, 1.0))
+        _draw_text_centered("✖ STOP", btn_x, btn_y, btn_w, btn_h, size=11 * scale, color=(1.0, 1.0, 1.0, 1.0))
         prompt_w = btn_x - prompt_x - 10.0 * scale
     else:
-        btn_run_w = 132.0 * scale
+        btn_run_w = 94.0 * scale
         btn_run_x = hud_x + hud_w - btn_run_w - 14.0 * scale
-        bounds['btn_action'] = (btn_run_x, mid_y, btn_run_w, mid_h)
+        bounds['btn_action'] = (btn_run_x, btn_y, btn_run_w, btn_h)
 
         # Draw Run Agent Button
         run_hover = (hover == 'btn_action')
         c_fill = (0.05, 0.62, 0.98, 1.0) if run_hover else (0.02, 0.50, 0.90, 1.0)
         c_border = (0.45, 0.88, 1.0, 0.95) if run_hover else (0.15, 0.65, 0.98, 0.8)
         _draw_rounded_box(
-            btn_run_x, mid_y, btn_run_w, mid_h, 10.0 * scale,
+            btn_run_x, btn_y, btn_run_w, btn_h, 10.0 * scale,
             fill_color=c_fill,
             border_color=c_border,
             border_width=max(1.0, 1.5 * scale),
         )
-        _draw_text_centered("✦ RUN AGENT", btn_run_x, mid_y, btn_run_w, mid_h, size=11.5 * scale, color=(1.0, 1.0, 1.0, 1.0))
+        _draw_text_centered("✦ RUN", btn_run_x, btn_y, btn_run_w, btn_h, size=11 * scale, color=(1.0, 1.0, 1.0, 1.0))
 
         prompt_w = btn_run_x - prompt_x - 10.0 * scale
 
@@ -567,12 +493,6 @@ def draw_viewport_hud():
     else:
         max_text_w = prompt_w - 18.0 * scale
 
-    # Keep attached-image context in the bottom control row so the prompt has
-    # its full width for writing a multi-line instruction.
-    from . import bridge_ui
-    ref_images = bridge_ui.reference_images(scene)
-    ref_image = ref_images[0] if ref_images else ''
-    has_ref = bool(ref_image)
     text_start_x = prompt_x + 12.0 * scale
     avail_text_w = max_text_w
 
@@ -595,120 +515,6 @@ def draw_viewport_hud():
             tw, _ = blf.dimensions(font_id, last_line)
             cursor_y = text_y - (len(prompt_lines) - 1) * line_h
             _draw_text('|', text_start_x + tw + 2.0 * scale, cursor_y, size=13 * scale, color=(0.0, 0.85, 1.0, 1.0))
-
-    # ── 4. Bottom Bar: Control Chips ─────────────────────────────────────────
-    bot_y = hud_y + 11.0 * scale
-    chip_h = 25.0 * scale
-    cur_x = hud_x + 14.0 * scale
-
-    # Chip 1: Backend Provider [⬡ Antigravity ⌵]
-    c1_w = 120.0 * scale
-    bounds['chip_backend'] = (cur_x, bot_y, c1_w, chip_h)
-    c1_hover = (hover == 'chip_backend')
-    _draw_rounded_box(
-        cur_x, bot_y, c1_w, chip_h, 12.0 * scale,
-        fill_color=(0.14, 0.18, 0.26, 0.95) if c1_hover else (0.09, 0.12, 0.18, 0.85),
-        border_color=(0.28, 0.38, 0.55, 0.8),
-        border_width=max(0.8, 1.0 * scale),
-    )
-    _draw_text_centered(f'⬡ {agent_name} ⌵', cur_x, bot_y, c1_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
-    cur_x += c1_w + 6.0 * scale
-
-    # Chip 2: Model [❖ Flash 3.8 ⌵]
-    c2_w = 124.0 * scale
-    bounds['chip_model'] = (cur_x, bot_y, c2_w, chip_h)
-    c2_hover = (hover == 'chip_model')
-    _draw_rounded_box(
-        cur_x, bot_y, c2_w, chip_h, 12.0 * scale,
-        fill_color=(0.14, 0.18, 0.26, 0.95) if c2_hover else (0.09, 0.12, 0.18, 0.85),
-        border_color=(0.28, 0.38, 0.55, 0.8),
-        border_width=max(0.8, 1.0 * scale),
-    )
-    _draw_text_centered(f'❖ {model_label} ⌵', cur_x, bot_y, c2_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
-    cur_x += c2_w + 6.0 * scale
-
-    # Chip: Auto-Verify [👁 Verify: ON / OFF]
-    auto_verify = getattr(scene, 'blendrelay_auto_verify', True)
-    cv_w = 104.0 * scale
-    if cur_x + cv_w < hud_x + hud_w - 24.0 * scale:
-        bounds['chip_verify'] = (cur_x, bot_y, cv_w, chip_h)
-        cv_hover = (hover == 'chip_verify')
-        if auto_verify:
-            cv_fill = (0.04, 0.22, 0.26, 0.95) if cv_hover else (0.03, 0.16, 0.20, 0.85)
-            cv_border = (0.0, 0.95, 1.0, 0.95) if cv_hover else (0.0, 0.75, 0.90, 0.8)
-            cv_color = (0.2, 0.95, 1.0, 1.0)
-            cv_text = '👁 Verify: ON'
-        else:
-            cv_fill = (0.16, 0.18, 0.24, 0.95) if cv_hover else (0.09, 0.12, 0.18, 0.85)
-            cv_border = (0.38, 0.45, 0.55, 0.8) if cv_hover else (0.25, 0.30, 0.40, 0.6)
-            cv_color = (0.60, 0.66, 0.76, 1.0)
-            cv_text = '👁 Verify: OFF'
-        _draw_rounded_box(
-            cur_x, bot_y, cv_w, chip_h, 12.0 * scale,
-            fill_color=cv_fill,
-            border_color=cv_border,
-            border_width=max(0.8, 1.0 * scale),
-        )
-        _draw_text_centered(cv_text, cur_x, bot_y, cv_w, chip_h, size=11 * scale, color=cv_color)
-        cur_x += cv_w + 6.0 * scale
-
-    # Chip 3: Reference Image Dropzone [🖼 Drop Image] or [🖼 villa.jpg ✕]
-    if has_ref:
-        img_name = Path(ref_image).name
-        short_name = img_name if len(img_name) <= 12 else (img_name[:9] + '…')
-        c_img_w = max(112.0, (len(short_name) * 7.2 + 48.0)) * scale
-        bounds['chip_image'] = (cur_x, bot_y, c_img_w, chip_h)
-        clr_w = 18.0 * scale
-        bounds['chip_image_clear'] = (cur_x + c_img_w - clr_w - 4.0 * scale, bot_y + (chip_h - clr_w) / 2.0, clr_w, clr_w)
-
-        img_hover = (hover == 'chip_image')
-        _draw_rounded_box(
-            cur_x, bot_y, c_img_w, chip_h, 12.0 * scale,
-            fill_color=(0.06, 0.22, 0.16, 0.95) if img_hover else (0.04, 0.16, 0.12, 0.85),
-            border_color=(0.2, 0.9, 0.55, 0.9) if img_hover else (0.12, 0.75, 0.45, 0.7),
-            border_width=max(0.8, 1.0 * scale),
-        )
-        _draw_text(f"🖼 {short_name}", cur_x + 8.0 * scale, bot_y + 7.0 * scale, size=11 * scale, color=(0.4, 1.0, 0.7, 1.0))
-        clr_hover = (hover == 'chip_image_clear')
-        _draw_text_centered("✕", cur_x + c_img_w - clr_w - 4.0 * scale, bot_y + (chip_h - clr_w) / 2.0, clr_w, clr_w, size=10 * scale, color=(1.0, 0.6, 0.6, 1.0) if clr_hover else (0.7, 0.9, 0.8, 1.0))
-        cur_x += c_img_w + 6.0 * scale
-    else:
-        c_img_w = 106.0 * scale
-        bounds['chip_image'] = (cur_x, bot_y, c_img_w, chip_h)
-        img_hover = (hover == 'chip_image')
-        _draw_rounded_box(
-            cur_x, bot_y, c_img_w, chip_h, 12.0 * scale,
-            fill_color=(0.14, 0.20, 0.28, 0.95) if img_hover else (0.09, 0.12, 0.18, 0.85),
-            border_color=(0.0, 0.82, 1.0, 0.8) if img_hover else (0.28, 0.38, 0.55, 0.8),
-            border_width=max(0.8, 1.0 * scale),
-        )
-        img_label = "🖼 Drop Image" if img_hover else "🖼 + Image"
-        _draw_text_centered(img_label, cur_x, bot_y, c_img_w, chip_h, size=11 * scale, color=(0.15, 0.88, 1.0, 1.0) if img_hover else (0.80, 0.86, 0.94, 1.0))
-        cur_x += c_img_w + 6.0 * scale
-
-    # Chip 3: Target Scope [🎯 Selected Only] vs [🌐 Full Scene]
-    c3_w = 132.0 * scale
-    bounds['chip_scope'] = (cur_x, bot_y, c3_w, chip_h)
-    c3_hover = (hover == 'chip_scope')
-    if only_selected:
-        scope_text = '🎯 Selected Only'
-        scope_fill = (0.28, 0.20, 0.08, 0.95)
-        scope_border = (0.95, 0.72, 0.20, 0.9)
-        scope_color = (1.0, 0.85, 0.35, 1.0)
-    else:
-        scope_text = '🌐 Full Scene'
-        scope_fill = (0.14, 0.18, 0.26, 0.95) if c3_hover else (0.09, 0.12, 0.18, 0.85)
-        scope_border = (0.28, 0.38, 0.55, 0.8)
-        scope_color = (0.88, 0.92, 0.98, 1.0)
-
-    _draw_rounded_box(
-        cur_x, bot_y, c3_w, chip_h, 12.0 * scale,
-        fill_color=scope_fill,
-        border_color=scope_border,
-        border_width=max(0.8, 1.0 * scale),
-    )
-    _draw_text_centered(scope_text, cur_x, bot_y, c3_w, chip_h, size=11 * scale, color=scope_color)
-    cur_x += c3_w + 6.0 * scale
 
     # Flash notification message
     now = time.monotonic()
@@ -855,7 +661,6 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 'resize_corner', 'resize_left', 'resize_right',
                 'btn_action', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
                 'scale_up', 'scale_down', 'scale_reset',
-                'chip_backend', 'chip_model', 'chip_verify', 'chip_image_clear', 'chip_image', 'chip_scope',
                 'header_drag',
             )
             for key in check_keys:
@@ -1034,66 +839,14 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                # 6. Backend Chip (Toggle Antigravity / Codex)
-                if is_inside(bounds.get('chip_backend')):
-                    cur = context.scene.blendrelay_agent_backend
-                    context.scene.blendrelay_agent_backend = 'CODEX' if cur == 'ANTIGRAVITY' else 'ANTIGRAVITY'
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # Reference Image Chip Clear
-                if is_inside(bounds.get('chip_image_clear')):
-                    from . import bridge_ui
-                    bridge_ui.set_reference_images(context.scene, [])
-                    HUD_STATE['flash_msg'] = 'All reference images removed'
-                    HUD_STATE['flash_time'] = time.monotonic()
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # Reference Image Chip (Click to browse / change)
-                if is_inside(bounds.get('chip_image')):
-                    bpy.ops.blendrelay.browse_reference_image('INVOKE_DEFAULT')
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # Chip Auto-Verify Toggle
-                if is_inside(bounds.get('chip_verify')):
-                    scene.blendrelay_auto_verify = not getattr(scene, 'blendrelay_auto_verify', True)
-                    status_txt = "ON" if scene.blendrelay_auto_verify else "OFF"
-                    HUD_STATE['flash_msg'] = f"Auto-Verify: {status_txt}"
-                    HUD_STATE['flash_time'] = time.monotonic()
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # 7. Model Chip (cycle through dynamically discovered choices)
-                if is_inside(bounds.get('chip_model')):
-                    from . import bridge_ui
-                    agent = context.scene.blendrelay_agent_backend
-                    model_prop = 'blendrelay_antigravity_model' if agent == 'ANTIGRAVITY' else 'blendrelay_codex_model'
-                    choices = [item[0] for item in _get_model_list(agent) if item[0] != bridge_ui.MODEL_CUSTOM]
-                    current = getattr(context.scene, model_prop, bridge_ui.MODEL_DEFAULT)
-                    index = (choices.index(current) + 1) % len(choices) if current in choices else 0
-                    setattr(context.scene, model_prop, choices[index])
-                    selected = bridge_ui.selected_model(context.scene, agent)
-                    HUD_STATE['flash_msg'] = f"Model: {selected or 'CLI default'}"
-                    HUD_STATE['flash_time'] = time.monotonic()
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # 8. Target Scope Chip (Selected Only vs Full Scene)
-                if is_inside(bounds.get('chip_scope')):
-                    context.scene.blendrelay_only_selected = not context.scene.blendrelay_only_selected
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # 9. Console Toggle Button
+                # 6. Console Toggle Button
                 if is_inside(bounds.get('btn_console')):
                     if hasattr(bpy.ops.wm, 'console_toggle'):
                         bpy.ops.wm.console_toggle()
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                # 10. Close Button
+                # 7. Close Button
                 if is_inside(bounds.get('btn_close')):
                     context.scene.blendrelay_show_viewport_hud = False
                     HUD_STATE['modal_active'] = False
