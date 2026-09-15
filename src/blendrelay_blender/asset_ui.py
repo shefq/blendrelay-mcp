@@ -164,20 +164,21 @@ class BR_PT_AssetLibrary(bpy.types.Panel):
 
     def draw(self,context):
         scene=context.scene;layout=self.layout
-        box=layout.box();box.label(text='Asset Provider Policy')
-        box.label(text='Local Asset Cache · always available',icon='CHECKMARK')
-        box.prop(scene,'blendrelay_asset_poly_haven',text='Poly Haven')
-        box.label(text='Public catalogue · CC0')
-        box.prop(scene,'blendrelay_asset_poly_pizza',text='Poly Pizza')
-        row=box.row(align=True)
-        row.prop(scene,'blendrelay_asset_pizza_cc0',text='CC0');row.prop(scene,'blendrelay_asset_pizza_cc_by',text='CC-BY')
-        box.prop(scene,'blendrelay_asset_max_download_mb',text='Maximum download (MB)')
+        box=layout.box()
+        header=box.row(align=True);header.label(text='Sources',icon='ASSET_MANAGER')
+        header.prop(scene,'blendrelay_asset_poly_haven',text='Poly Haven',toggle=True)
+        header.prop(scene,'blendrelay_asset_poly_pizza',text='Poly Pizza',toggle=True)
+        if scene.blendrelay_asset_poly_pizza:
+            row=box.row(align=True)
+            row.prop(scene,'blendrelay_asset_pizza_cc0',text='CC0',toggle=True)
+            row.prop(scene,'blendrelay_asset_pizza_cc_by',text='CC-BY',toggle=True)
+        box.prop(scene,'blendrelay_asset_max_download_mb',text='Download limit')
         layout.prop(scene,'blendrelay_asset_query',text='Search')
         layout.prop(scene,'blendrelay_asset_provider',text='Provider')
         row=layout.row(align=True);row.enabled=not STATE['job']
         row.operator('blendrelay.asset_action',text='Search',icon='VIEWZOOM').action='SEARCH'
-        row.operator('blendrelay.asset_action',text='Refresh local cache',icon='FILE_REFRESH').action='REFRESH'
-        layout.template_list('BR_UL_AssetResults','',scene,'blendrelay_asset_results',scene,'blendrelay_asset_index',rows=4)
+        row.operator('blendrelay.asset_action',text='Refresh',icon='FILE_REFRESH').action='REFRESH'
+        layout.template_list('BR_UL_AssetResults','',scene,'blendrelay_asset_results',scene,'blendrelay_asset_index',rows=3)
         rows=scene.blendrelay_asset_results
         if rows and scene.blendrelay_asset_index<len(rows):
             record=json.loads(rows[scene.blendrelay_asset_index].record)
@@ -186,15 +187,16 @@ class BR_PT_AssetLibrary(bpy.types.Panel):
             if thumbnail:
                 thumbnail.preview_ensure()
                 icon_id=thumbnail.preview.icon_id
-                if icon_id: detail.template_icon(icon_value=icon_id,scale=4.0)
+                if icon_id: detail.template_icon(icon_value=icon_id,scale=3.0)
                 else: detail.label(text='Thumbnail available',icon='IMAGE')
-            for text in (record['name'],record['provider'].replace('_',' ').title()+' · '+record['licence'], 'Creator: '+record.get('creator','Unknown'), 'Format: '+record.get('format','unknown'),'Size: '+(f"{record['size_bytes']/1048576:.1f} MB" if record.get('size_bytes') is not None else 'checked during download')):
+            size=(f"{record['size_bytes']/1048576:.1f} MB" if record.get('size_bytes') is not None else 'size checked on download')
+            for text in (record['name'],record['provider'].replace('_',' ').title()+' · '+record['licence'],record.get('format','unknown')+' · '+size):
                 detail.label(text=text)
-        row=layout.row();row.enabled=not STATE['job']
-        row.operator('blendrelay.asset_action',text='Import selected asset',icon='IMPORT').action='IMPORT'
-        layout.operator('blendrelay.asset_action',text='Open cached asset location',icon='FILE_FOLDER').action='OPEN'
-        for line in textwrap.wrap(STATE['status'],55): layout.label(text=line)
-        layout.label(text='Powered by Poly Haven')
+        row=layout.row(align=True);row.enabled=not STATE['job']
+        row.operator('blendrelay.asset_action',text='Import',icon='IMPORT').action='IMPORT'
+        row.operator('blendrelay.asset_action',text='Open Cache',icon='FILE_FOLDER').action='OPEN'
+        if STATE['status']:
+            layout.label(text=STATE['status'][:52],icon='INFO')
 
 
 CLASSES=(BR_AssetResult,BR_UL_AssetResults,BR_OT_AssetAction,BR_PT_AssetLibrary)

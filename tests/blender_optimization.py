@@ -8,6 +8,16 @@ ui.refresh_models_async = lambda: None
 ui.sketch.register_overlay = lambda: None
 ui.viewport_hud.register_hud = lambda: None
 ui.register()
+previous_prompt = bpy.context.scene.blendrelay_codex_prompt
+previous_backend = bpy.context.scene.blendrelay_agent_backend
+bpy.context.scene.blendrelay_agent_backend = 'CODEX'
+bpy.context.scene.blendrelay_codex_prompt = '   '
+assert ui.viewport_hud._submit_agent_prompt(bpy.context) is False
+assert ui.viewport_hud.HUD_STATE['typing'] is True
+assert ui.viewport_hud.HUD_STATE['flash_msg'] == 'Enter a prompt for Codex'
+ui.viewport_hud.HUD_STATE['typing'] = False
+bpy.context.scene.blendrelay_codex_prompt = previous_prompt
+bpy.context.scene.blendrelay_agent_backend = previous_backend
 assert bpy.context.scene.blendrelay_task_mode == 'AUTO'
 assert bpy.context.scene.blendrelay_resource_mode == 'FULL_BUILD'
 assert bpy.context.scene.blendrelay_verification == 'AUTO'
@@ -18,10 +28,12 @@ assert bpy.context.scene.blendrelay_allow_antigravity_mcp is True
 assert bpy.context.scene.blendrelay_unattended_agent_permissions is True
 assert bpy.context.scene.blendrelay_hud_adaptive is True
 wide_metrics = ui.viewport_hud._hud_layout_metrics(1600, 900, 780, 1.0, adaptive=True)
-assert round(wide_metrics['width']) == 880 and round(wide_metrics['height']) == round(122 * (880 / 780))
+assert round(wide_metrics['width']) == 1280 and round(wide_metrics['height']) == 129
 metrics = ui.viewport_hud._hud_layout_metrics(600, 300, 780, 1.0, adaptive=True)
-assert round(metrics['width']) == 390 and round(metrics['height']) == 61 and metrics['auto_scaled']
-manual = ui.viewport_hud._hud_layout_metrics(1600, 900, 780, wide_metrics['scale'], adaptive=False)
+assert round(metrics['width']) == 480 and round(metrics['height']) == 79 and metrics['auto_scaled']
+manual = ui.viewport_hud._hud_layout_metrics(
+    1600, 900, wide_metrics['base_width'], wide_metrics['scale'], adaptive=False
+)
 assert manual['scale'] == wide_metrics['scale'] and round(manual['width']) == round(wide_metrics['width'])
 batch = general.build_batch([
     {'type': 'collection', 'name': 'Batch Scene'},

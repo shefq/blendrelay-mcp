@@ -250,6 +250,37 @@ def _wrap_prompt_text(text, max_w, size=13, max_lines=3):
     return lines
 
 
+def _submit_agent_prompt(context):
+    """Submit from the HUD without allowing operator errors to escape the modal."""
+    scene = context.scene
+    backend = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
+    agent_name = 'Antigravity' if backend == 'ANTIGRAVITY' else 'Codex'
+
+    if not getattr(scene, 'blendrelay_codex_prompt', '').strip():
+        HUD_STATE['typing'] = True
+        HUD_STATE['flash_msg'] = f'Enter a prompt for {agent_name}'
+        HUD_STATE['flash_time'] = time.monotonic()
+        return False
+
+    try:
+        result = bpy.ops.blendrelay.send_to_agent()
+    except RuntimeError as error:
+        message = str(error).strip().splitlines()[0] if str(error).strip() else 'Could not start agent'
+        if message.startswith('Error: '):
+            message = message[7:]
+        HUD_STATE['typing'] = True
+        HUD_STATE['flash_msg'] = message
+        HUD_STATE['flash_time'] = time.monotonic()
+        return False
+
+    if 'CANCELLED' in result:
+        HUD_STATE['typing'] = True
+        return False
+
+    HUD_STATE['typing'] = False
+    return True
+
+
 # ── Main 2D Drawing Callback ────────────────────────────────────────────────
 
 def draw_viewport_hud():
@@ -695,9 +726,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 if event.shift:
                     context.scene.blendrelay_codex_prompt += '\n'
                 else:
-                    HUD_STATE['typing'] = False
-                    if context.scene.blendrelay_codex_prompt.strip():
-                        bpy.ops.blendrelay.send_to_agent()
+                    _submit_agent_prompt(context)
                 target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
@@ -818,8 +847,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     if is_running:
                         bpy.ops.blendrelay.cancel_agent()
                     else:
-                        HUD_STATE['typing'] = False
-                        bpy.ops.blendrelay.send_to_agent()
+                        _submit_agent_prompt(context)
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 

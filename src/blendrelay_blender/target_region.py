@@ -277,21 +277,20 @@ class BR_OT_SendRegion(bpy.types.Operator):
 
 def draw(layout, context):
     card = layout.box()
-    card.label(text='3D Prompt Region', icon='CUBE')
     guide = box(context.scene)
+    header = card.row(align=True)
+    header.label(text='3D Prompt Region', icon='CUBE')
     if guide is None:
-        card.operator('blendrelay.draw_target_region', text='Draw Target Box')
-        card.label(text='Drag width/length; wheel adjusts height.')
-        card.label(text='Drawing plane: XY at the 3D cursor height')
+        header.operator('blendrelay.draw_target_region', text='Draw Box', icon='ADD')
+        card.label(text='Drag footprint · wheel changes height', icon='INFO')
     else:
-        card.operator('blendrelay.adjust_region_faces', text='Adjust Six Faces')
-        card.operator('blendrelay.remove_target_region', text='Remove Box', icon='TRASH')
-    card.label(text='Describe the change, style and materials.')
+        header.operator('blendrelay.adjust_region_faces', text='Adjust', icon='ORIENTATION_LOCAL')
+        header.operator('blendrelay.remove_target_region', text='', icon='TRASH')
     prompt_prop = 'blendrelay_codex_prompt'
     card.prop(context.scene, prompt_prop, text='Prompt')
     row = card.row()
     row.enabled = guide is not None
-    row.operator('blendrelay.send_region_prompt')
+    row.operator('blendrelay.send_region_prompt', text='Apply to Region', icon='PLAY')
 
 
 CLASSES = (BR_OT_DrawRegion, BR_OT_SelectRegion, BR_OT_AdjustRegionFaces,

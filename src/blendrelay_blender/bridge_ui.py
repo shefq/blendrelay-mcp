@@ -1478,10 +1478,9 @@ class BR_PT_Main(bpy.types.Panel):
         layout = self.layout
         scene = context.scene
 
-        # ── 1. Top Header Banner & Connection Status ────────────────────────
-        header_box = layout.box()
-        header_row = header_box.row(align=True)
-        header_row.label(text='BlendRelay Studio', icon='AUTO')
+        # ── 1. Compact header and connection status ─────────────────────────
+        header_row = layout.row(align=True)
+        header_row.label(text='BlendRelay', icon='AUTO')
         header_row.operator(
             'blendrelay.toggle_viewport_hud',
             text='HUD',
@@ -1494,23 +1493,25 @@ class BR_PT_Main(bpy.types.Panel):
             addon_version = ''
         header_row.label(text='v' + addon_version if addon_version else 'v')
 
-        conn_row = header_box.row(align=True)
+        conn_row = layout.row(align=True)
         conn = STATE.get('connection')
         if conn:
-            conn_row.label(text='● Connected', icon='CHECKMARK')
+            conn_row.label(text='Connected', icon='CHECKMARK')
             conn_row.operator('blendrelay.refresh', text='', icon='FILE_REFRESH')
             conn_row.operator('blendrelay.disconnect', text='', icon='X')
         else:
             conn_row.alert = True
-            conn_row.label(text='● Disconnected', icon='ERROR')
+            conn_row.label(text='Disconnected', icon='ERROR')
             conn_row.operator('blendrelay.refresh', text='Connect', icon='PLAY')
+        if hasattr(bpy.ops.wm, 'console_toggle'):
+            conn_row.operator('wm.console_toggle', text='', icon='CONSOLE')
 
         # ── 2. Segmented Pill Navigation Bar ────────────────────────────────
         nav_row = layout.row(align=True)
-        nav_row.scale_y = 1.25
+        nav_row.scale_y = 1.05
         nav_row.prop(scene, 'blendrelay_ui_tab', expand=True)
 
-        layout.separator(factor=0.4)
+        layout.separator(factor=0.15)
 
         tab = getattr(scene, 'blendrelay_ui_tab', 'GENERATE')
 
@@ -1518,7 +1519,6 @@ class BR_PT_Main(bpy.types.Panel):
         if tab == 'GENERATE':
             agent = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
             agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
-            model = selected_model(scene, agent) or 'CLI default'
 
             # Active Task Running Banner
             active_proc = STATE.get('agent_process') or STATE.get('codex_process')
@@ -1529,84 +1529,75 @@ class BR_PT_Main(bpy.types.Panel):
                 task_row.alert = True
                 task_row.label(text=f'⚡ {agent_name} is generating…', icon='TIME')
                 task_row.operator('blendrelay.cancel_agent', text='Cancel', icon='CANCEL')
-            elif STATE.get('status') and STATE['status'] != 'Disconnected':
-                status_box = layout.box()
-                s_row = status_box.row(align=True)
-                s_row.label(text=f'Engine: {agent_name}', icon='CONSOLE')
-                s_row.label(text=f'{model[:22]}', icon='RADIOBUT_ON')
-
             # Prompt Card
             prompt_card = layout.box()
             p_header = prompt_card.row(align=True)
-            p_header.label(text='Prompt Instruction', icon='TEXT')
+            p_header.label(text='Prompt', icon='TEXT')
             if scene.blendrelay_codex_prompt:
                 p_header.operator('blendrelay.clear_prompt', text='', icon='X', emboss=False)
 
             prompt_card.prop(scene, 'blendrelay_codex_prompt', text='')
 
-
-
-            layout.separator(factor=0.3)
-
             # Engine and dynamically discovered model
             engine_card = layout.box()
-            e_header = engine_card.row(align=True)
-            e_header.label(text='Model & Engine', icon='AUTO')
-            e_header.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
             e_row = engine_card.row(align=True)
-            e_row.scale_y = 1.15
             e_row.prop(scene, 'blendrelay_agent_backend', expand=True)
+            e_row.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
             model_prop = 'blendrelay_antigravity_model' if agent == 'ANTIGRAVITY' else 'blendrelay_codex_model'
             custom_prop = 'blendrelay_antigravity_model_custom' if agent == 'ANTIGRAVITY' else 'blendrelay_codex_model_custom'
             engine_card.prop(scene, model_prop, text='Model')
             if getattr(scene, model_prop, MODEL_DEFAULT) == MODEL_CUSTOM:
                 engine_card.prop(scene, custom_prop, text='Custom model')
 
-            layout.separator(factor=0.3)
-
-            # Reference Image Card
+            # Reference images stay on one row until images are attached.
             ref_images = reference_images(scene)
-            img_box = layout.box()
-            i_head = img_box.row(align=True)
-            i_head.label(text=f'Reference Images ({len(ref_images)})', icon='IMAGE_DATA')
+            i_head = layout.row(align=True)
+            i_head.label(text=f'References ({len(ref_images)})', icon='IMAGE_DATA')
+            i_head.operator('blendrelay.browse_reference_image', text='Add', icon='ADD')
             if ref_images:
                 i_head.operator('blendrelay.clear_reference_image', text='', icon='X', emboss=False)
+                img_box = layout.box()
                 for index, image_path in enumerate(ref_images):
                     i_row = img_box.row(align=True)
-                    i_row.label(text=Path(image_path).name[:48], icon='CHECKMARK')
+                    i_row.label(text=Path(image_path).name[:32], icon='CHECKMARK')
                     remove = i_row.operator('blendrelay.remove_reference_image', text='', icon='X', emboss=False)
                     remove.index = index
-                img_box.operator('blendrelay.browse_reference_image', text='Add Images…', icon='ADD')
-            else:
-                img_box.operator('blendrelay.browse_reference_image', text='Add Images…', icon='FILE_FOLDER')
-            img_box.label(text='Drop one or more images onto the 3D Viewport, or use Add Images.', icon='INFO')
-
-            layout.separator(factor=0.3)
 
             layout.prop(scene, 'blendrelay_task_mode')
             layout.prop(scene, 'blendrelay_verification')
+
             budget_box = layout.box()
-            budget_box.label(text='Generation Profile', icon='SETTINGS')
-            budget_box.prop(scene, 'blendrelay_resource_mode', text='Mode')
-            budget_box.prop(scene, 'blendrelay_output_quality', text='Quality')
-            budget_box.prop(scene, 'blendrelay_permission_mode', text='Permissions')
-            limits=workflow.profile(scene.blendrelay_resource_mode,scene.blendrelay_output_quality)
-            budget_box.label(text=f"Starts {limits['initial_calls']} calls · {limits['initial_edits']} edits", icon='INFO')
-            budget_box.label(text=f"Auto-expands to {limits['max_calls']} calls · {limits['max_edits']} edits")
+            profile_row = budget_box.row(align=True)
+            profile_row.label(text='Profile', icon='SETTINGS')
+            profile_row.prop(scene, 'blendrelay_resource_mode', text='')
+            options_row = budget_box.row(align=True)
+            options_row.prop(scene, 'blendrelay_output_quality', text='Quality')
+            options_row.prop(scene, 'blendrelay_permission_mode', text='')
+            limits = workflow.profile(scene.blendrelay_resource_mode, scene.blendrelay_output_quality)
+            budget_box.label(
+                text=f"{limits['initial_calls']} calls · {limits['initial_edits']} edits → "
+                     f"{limits['max_calls']} · {limits['max_edits']} max",
+                icon='INFO',
+            )
+
             row = layout.row(align=True)
-            row.prop(scene, 'blendrelay_continue_conversation')
-            row.operator('blendrelay.new_conversation', text='New Conversation')
+            row.prop(scene, 'blendrelay_continue_conversation', text='Continue', toggle=True)
+            row.operator('blendrelay.new_conversation', text='New', icon='FILE_NEW')
+
             usage = STATE.get('last_usage', {})
             if usage:
                 summary = usage.get('provider_usage', {})
                 card = layout.box()
-                card.label(text='Last run usage (provider reported)')
-                for key in ('input_tokens','output_tokens','cache_read_tokens','cached_input_tokens','thinking_tokens'):
-                    if key in summary:
-                        card.label(text=key.replace('_',' ') + ': ' + format(summary[key], ','))
-                card.label(text='Tool calls: ' + str(sum(usage.get('tool_calls_by_stage', {}).values())))
+                input_tokens = summary.get('input_tokens', 0)
+                output_tokens = summary.get('output_tokens', 0)
+                tool_calls = sum(usage.get('tool_calls_by_stage', {}).values())
+                card.label(text=f'Last run: {input_tokens:,} in · {output_tokens:,} out · {tool_calls} tools', icon='INFO')
+                cache_tokens = summary.get('cache_read_tokens', summary.get('cached_input_tokens'))
+                if cache_tokens:
+                    card.label(text=f'Cache read: {cache_tokens:,}')
                 if usage.get('warnings'):
-                    card.label(text='Repeated requests detected; see .usage.json', icon='INFO')
+                    card.label(text='Repeated requests; see .usage.json', icon='ERROR')
+
             # Target Scope Card
             scope_card = layout.box()
             sc_header = scope_card.row(align=True)
@@ -1622,26 +1613,18 @@ class BR_PT_Main(bpy.types.Panel):
             sc_row = scope_card.row(align=True)
             sc_row.prop(scene, 'blendrelay_only_selected', text='Only selected geometry' if context.mode == 'EDIT_MESH' else 'Only selected objects', toggle=True)
 
-            if getattr(scene, 'blendrelay_only_selected', False):
-                scope_card.label(text='Target: selected vertices / edges / faces' if context.mode == 'EDIT_MESH' else 'Target: selected objects', icon='RESTRICT_SELECT_OFF')
-
-            layout.separator(factor=0.4)
-
-            # Primary Call-To-Action Button
+            # Verification and primary actions
             ver_row = layout.row(align=True)
-            ver_row.prop(scene, 'blendrelay_auto_verify', text='Auto-Verify & Fix (vision loop)', icon='VIEWZOOM')
+            ver_row.prop(scene, 'blendrelay_auto_verify', text='Auto Verify', icon='VIEWZOOM', toggle=True)
+            ver_row.operator('blendrelay.verify_and_fix', text='Verify', icon='IMAGE_DATA')
 
             cta_row = layout.row(align=True)
-            cta_row.scale_y = 1.55
-            cta_row.operator('blendrelay.send_to_agent', text=f'✨ Generate with {agent_name}', icon='PLAY')
-            cta_row.operator('blendrelay.verify_and_fix', text='👁 Verify & Fix', icon='IMAGE_DATA')
+            cta_row.scale_y = 1.3
+            cta_row.operator('blendrelay.send_to_agent', text=f'Generate with {agent_name}', icon='PLAY')
 
-            sub_row = layout.row(align=True)
-            if hasattr(bpy.ops.wm, 'console_toggle'):
-                sub_row.operator('wm.console_toggle', text='Toggle Console', icon='CONSOLE')
             last_log = STATE.get('agent_log') or STATE.get('codex_log')
             if last_log and Path(last_log).exists():
-                sub_row.label(text=f'Log: {Path(last_log).name[:20]}', icon='FILE_TEXT')
+                layout.label(text=f'Log: {Path(last_log).name[:28]}', icon='FILE_TEXT')
 
         # ── TAB: SKETCH ─────────────────────────────────────────────────────
         elif tab == 'SKETCH':
@@ -1656,16 +1639,15 @@ class BR_PT_Main(bpy.types.Panel):
                 sketch_box.label(text=f'Targeting: {hits_str}', icon='RESTRICT_SELECT_OFF')
 
             btn_row = sketch_box.row(align=True)
-            btn_row.scale_y = 1.3
+            btn_row.scale_y = 1.1
             btn_row.operator('blendrelay.draw_viewport_sketch', text='Draw Stroke', icon='BRUSH_DATA')
             btn_row.operator('blendrelay.new_viewport_sketch', text='New', icon='FILE_NEW')
             btn_row.operator('blendrelay.clear_viewport_sketch', text='Clear', icon='TRASH')
 
             if STATE.get('sketch_viewport'):
-                vp_box = sketch_box.box()
-                vp_box.label(text='Snapshot: ' + Path(STATE['sketch_viewport']).name, icon='IMAGE_DATA')
+                sketch_box.label(text='Snapshot: ' + Path(STATE['sketch_viewport']).name, icon='IMAGE_DATA')
 
-            layout.separator(factor=0.5)
+            layout.separator(factor=0.2)
             target_region.draw(layout, context)
 
         # ── TAB: HISTORY (Checkpoints) ──────────────────────────────────────
@@ -1676,14 +1658,12 @@ class BR_PT_Main(bpy.types.Panel):
             h_row.label(text=f'{len(STATE["versions"])} saved')
 
             create_row = layout.row(align=True)
-            create_row.scale_y = 1.2
             create_row.operator('blendrelay.checkpoint', text='💾 Save Checkpoint', icon='ADD')
             create_row.operator('blendrelay.clear_stored_data', text='', icon='TRASH')
 
             if not STATE['versions']:
                 empty_card = layout.box()
-                empty_card.label(text='No checkpoints saved yet.', icon='INFO')
-                empty_card.label(text='Checkpoints are saved automatically after AI tasks.')
+                empty_card.label(text='No checkpoints yet; AI tasks save them automatically.', icon='INFO')
             else:
                 list_box = layout.box()
                 for entry in reversed(STATE['versions'][:15]):
@@ -1694,11 +1674,9 @@ class BR_PT_Main(bpy.types.Panel):
         # ── TAB: SETTINGS ───────────────────────────────────────────────────
         elif tab == 'SETTINGS':
             settings_box = layout.box()
-            settings_box.label(text='Agent Backend & Models', icon='PREFERENCES')
-
             b_row = settings_box.row(align=True)
-            b_row.scale_y = 1.15
             b_row.prop(scene, 'blendrelay_agent_backend', expand=True)
+            b_row.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
 
             agent = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
 
@@ -1707,62 +1685,54 @@ class BR_PT_Main(bpy.types.Panel):
             col.use_property_decorate = False
 
             if agent == 'ANTIGRAVITY':
-                row = col.row(align=True)
-                row.prop(scene, 'blendrelay_antigravity_model', text='Model')
-                row.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
+                col.prop(scene, 'blendrelay_antigravity_model', text='Model')
                 if scene.blendrelay_antigravity_model == MODEL_CUSTOM:
                     col.prop(scene, 'blendrelay_antigravity_model_custom', text='Custom model')
                 col.prop(scene, 'blendrelay_antigravity_path', text='CLI Path')
             else:
-                row = col.row(align=True)
-                row.prop(scene, 'blendrelay_codex_model', text='Model')
-                row.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
+                col.prop(scene, 'blendrelay_codex_model', text='Model')
                 if scene.blendrelay_codex_model == MODEL_CUSTOM:
                     col.prop(scene, 'blendrelay_codex_model_custom', text='Custom model')
                 col.prop(scene, 'blendrelay_codex_path', text='CLI Path')
-            col.label(text=STATE.get('model_status', 'Models are loaded from the active CLI account.'), icon='INFO')
+            model_status = STATE.get('model_status')
+            if model_status:
+                col.label(text=model_status[:48], icon='INFO')
 
-            permissions_box=layout.box()
-            permissions_box.label(text='Agent Permissions',icon='LOCKED')
-            permissions_box.prop(scene,'blendrelay_permission_mode',text='Generation mode')
-            permissions_box.prop(scene,'blendrelay_allow_python_execution',text='Allow arbitrary Python execution')
+            permissions_box = layout.box()
+            permission_row = permissions_box.row(align=True)
+            permission_row.label(text='Permissions', icon='LOCKED')
+            permission_row.prop(scene, 'blendrelay_permission_mode', text='')
+            permissions_box.prop(scene, 'blendrelay_allow_python_execution', text='Allow Python execution')
             if agent == 'ANTIGRAVITY':
-                permissions_box.prop(scene,'blendrelay_allow_antigravity_mcp',text='Allow BlendRelay MCP tools')
-            permissions_box.prop(scene,'blendrelay_unattended_agent_permissions',text='Allow unattended CLI permissions')
-            permissions_box.label(text='Python approval is stored per Blender scene.',icon='INFO')
-
-            layout.separator(factor=0.5)
+                permissions_box.prop(scene, 'blendrelay_allow_antigravity_mcp', text='Allow MCP tools')
+            permissions_box.prop(scene, 'blendrelay_unattended_agent_permissions', text='Allow unattended CLI')
 
             hud_box = layout.box()
-            hud_box.label(text='Floating Viewport HUD', icon='WINDOW')
+            hud_header = hud_box.row(align=True)
+            hud_header.label(text='Viewport HUD', icon='WINDOW')
+            hud_header.prop(scene, 'blendrelay_show_viewport_hud', text='Show', toggle=True)
+            hud_header.operator('blendrelay.reset_hud_transform', text='', icon='LOOP_BACK')
             col_hud = hud_box.column()
             col_hud.use_property_split = True
             col_hud.use_property_decorate = False
-            col_hud.prop(scene, 'blendrelay_show_viewport_hud', text='Show HUD')
             col_hud.prop(scene, 'blendrelay_hud_adaptive', text='Adaptive Size')
             width_row = col_hud.row()
             width_row.enabled = not scene.blendrelay_hud_adaptive
             width_row.prop(scene, 'blendrelay_hud_width', text='Manual Width (px)')
-            col_hud.prop(scene, 'blendrelay_hud_scale', text='Scale Adjustment', slider=True)
-            hud_box.operator('blendrelay.reset_hud_transform', text='Reset HUD Layout', icon='LOOP_BACK')
-
-            layout.separator(factor=0.5)
+            col_hud.prop(scene, 'blendrelay_hud_scale', text='Scale', slider=True)
 
             runtime_box = layout.box()
-            runtime_box.label(text='Runtime Bridge & Storage', icon='NETWORK_DRIVE')
+            runtime_header = runtime_box.row(align=True)
+            runtime_header.label(text='Runtime & Storage', icon='NETWORK_DRIVE')
+            runtime_header.operator('blendrelay.clear_stored_data', text='', icon='TRASH')
             col_rt = runtime_box.column()
             col_rt.use_property_split = True
             col_rt.use_property_decorate = False
-            col_rt.prop(scene, 'blendrelay_runtime_dir', text='Base Data Directory')
+            col_rt.prop(scene, 'blendrelay_runtime_dir', text='Data Directory')
             try:
                 col_rt.label(text='Scene: ' + str(general.workspace_root(scene.blendrelay_runtime_dir, scene).relative_to(Path(scene.blendrelay_runtime_dir))), icon='FILE_FOLDER')
             except Exception:
                 pass
-
-            runtime_box.separator(factor=0.5)
-            row_clear = runtime_box.row(align=True)
-            row_clear.scale_y = 1.25
-            row_clear.operator('blendrelay.clear_stored_data', text='Clear Current Scene Data…', icon='TRASH')
 
 
 CLASSES = (
@@ -1800,7 +1770,7 @@ def register():
     asset_ui.register()
     for cls in CLASSES:
         bpy.utils.register_class(cls)
-    bpy.types.Scene.blendrelay_continue_conversation = BoolProperty(name='Continue conversation', description='Resume this workspace conversation with fresh scene context', default=False)
+    bpy.types.Scene.blendrelay_continue_conversation = BoolProperty(name='Continue conversation', description='Resume this workspace conversation with fresh scene context', default=True)
     bpy.types.Scene.blendrelay_task_mode = EnumProperty(name='Workflow', items=[('AUTO','Auto','Detect the Blender workflow from mode, selection and request'),('EDIT','Focused Change','Targeted changes to current data'),('BUILD','Full Creation','Create a complete Blender result'),('ANIMATION','Animation','Animation, actions, timing and motion'),('RIGGING','Rigging','Armatures, skinning, constraints and poses'),('SHADING','Shading','Materials, textures and UV work'),('NODES','Nodes','Geometry Nodes, shader nodes or compositor graphs'),('SIMULATION','Simulation','Physics, particles, hair and cached effects'),('RENDERING','Rendering','Cameras, lighting, worlds and output'),('DATA','Data Management','Datablocks, collections, linking and cleanup')],default='AUTO')
     bpy.types.Scene.blendrelay_verification = EnumProperty(name='Verification',items=[('AUTO','Auto','Geometry checks and relevant visuals when Auto-Verify is enabled'),('GEOMETRY','Geometry','Geometry checks without final images'),('VISUAL','Geometry + Visual','Geometry checks and targeted visual verification')],default='AUTO')
     bpy.types.Scene.blendrelay_runtime_dir = StringProperty(name='Runtime', subtype='DIR_PATH', default=default_root())
