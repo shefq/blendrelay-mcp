@@ -6,6 +6,8 @@ BlendRelay MCP brings AI 3D modeling and text-to-Blender workflows into Blender 
 
 [Install from PyPI](https://pypi.org/project/blendrelay-mcp/) · [View the source on GitHub](https://github.com/shefq/blendrelay-mcp)
 
+![BlendRelay MCP Blender AI add-on generating and editing a detailed 3D city scene](https://raw.githubusercontent.com/shefq/blendrelay-mcp/main/docs/images/blendrelay-blender-ai-interface.webp)
+
 ## What you can do
 
 - Generate complete scenes, environments, props, buildings, products, and abstract artwork.
