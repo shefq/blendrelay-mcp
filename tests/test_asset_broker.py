@@ -3,10 +3,10 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from archforge_blender.asset_rules import AssetError, AssetPolicy
-from archforge_runtime.asset_broker import AssetBroker, OFFLINE
-from archforge_runtime.asset_providers import PolyHaven, PolyPizza
-from archforge_runtime.service import Service
+from blendrelay_blender.asset_rules import AssetError, AssetPolicy
+from blendrelay_runtime.asset_broker import AssetBroker, OFFLINE
+from blendrelay_runtime.asset_providers import PolyHaven, PolyPizza
+from blendrelay_runtime.service import Service
 
 
 def row(provider='poly_haven', asset_id='stone', licence='CC0', creator='Creator', **extra):

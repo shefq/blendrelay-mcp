@@ -2,9 +2,9 @@
 import os
 from pathlib import Path
 import sys
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 import bpy
-from archforge_blender import register
+from blendrelay_blender import register
 register()
-bpy.context.scene.archforge_runtime_dir=os.environ['ARCHFORGE_TEST_ROOT']
-bpy.ops.archforge.refresh()
+bpy.context.scene.blendrelay_runtime_dir = os.environ['BLENDRELAY_TEST_ROOT']
+bpy.ops.blendrelay.refresh()

@@ -1,8 +1,8 @@
 import tempfile
 import time
 import unittest
-from archforge_runtime.service import Service
-from archforge_runtime.errors import DomainError
+from blendrelay_runtime.service import Service
+from blendrelay_runtime.errors import BlendRelayError, DomainError
 
 
 class GeneralBridgeTests(unittest.TestCase):

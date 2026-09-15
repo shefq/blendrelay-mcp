@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+id = "blendrelay_mcp"
+version = "0.7.0"
+name = "BlendRelay MCP"
+tagline = "Control Blender with AI agents through MCP"
+maintainer = "BlendRelay MCP contributors"
+type = "add-on"
+tags = ["3D View", "Add Mesh"]
+blender_version_min = "4.5.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+network = "Connect to the local BlendRelay runtime"
+files = "Read local runtime discovery and save editable project snapshots"

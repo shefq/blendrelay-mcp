@@ -2,11 +2,11 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
-from archforge_blender import conversation
-from archforge_mcp.job_results import wait_and_compact
-from archforge_mcp.server import handle
-from archforge_blender.workflow import compact, choose, instructions, RESOURCE_MODE_ITEMS, resource_limits, profile
-from archforge_blender.run_metrics import Metrics
+from blendrelay_blender import conversation
+from blendrelay_mcp.job_results import wait_and_compact
+from blendrelay_mcp.server import handle
+from blendrelay_blender.workflow import compact, choose, instructions, RESOURCE_MODE_ITEMS, resource_limits, profile
+from blendrelay_blender.run_metrics import Metrics
 
 
 class FakeClient:

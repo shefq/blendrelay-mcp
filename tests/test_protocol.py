@@ -2,8 +2,8 @@ import socket
 import threading
 import time
 import unittest
-from archforge_runtime.protocol import frame,receive
-from archforge_mcp.server import handle
+from blendrelay_runtime.protocol import frame,receive
+from blendrelay_mcp.server import handle
 
 
 class ProtocolTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_mcp_initialize_and_tools(self):
         init=handle({'method':'initialize','params':{'protocolVersion':'2025-11-25'}},None)
-        self.assertEqual(init['serverInfo']['name'],'archforge-mcp')
+        self.assertEqual(init['serverInfo']['name'],'blendrelay-mcp')
         result=handle({'method':'tools/list'},None)
         names={t['name'] for t in result['tools']}
         self.assertIn('execute_blender_python',names)
@@ -29,7 +29,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('mesh_edit',names)
         self.assertIn('capture_viewport',names)
         self.assertIn('capture_focused_view',names)
-        self.assertIn('archforge_blender_sessions',names)
+        self.assertIn('blendrelay_blender_sessions',names)
         self.assertTrue({'get_asset_policy','search_assets','import_asset','list_cached_assets','refresh_asset_cache','asset_job'} <= names)
         self.assertNotIn('project_create', names)
         command=next(t for t in result['tools'] if t['name']=='execute_blender_python')

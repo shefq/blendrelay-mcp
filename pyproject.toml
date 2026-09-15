@@ -3,23 +3,22 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "archforge-mcp"
+name = "blendrelay-mcp"
 dynamic = ["version"]
-description = "General-purpose local MCP tools and an AI workflow extension for Blender"
+description = "General-purpose MCP server and AI workflow extension for Blender"
 requires-python = ">=3.11"
 readme = "README.md"
 license = {text = "MIT AND GPL-3.0-or-later"}
 dependencies = []
 
 [project.scripts]
-archforge-mcp = "archforge_mcp.cli:main"
-archforge-runtime = "archforge_runtime.cli:main"
+blendrelay-mcp = "blendrelay_mcp.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "archforge_blender.version.__version__"}
+version = {attr = "blendrelay_blender.version.__version__"}
 
 [tool.setuptools.package-data]
-archforge_blender = ["*.py", "blender_manifest.toml", "COPYING.txt"]
+blendrelay_blender = ["*.py", "blender_manifest.toml", "COPYING.txt"]

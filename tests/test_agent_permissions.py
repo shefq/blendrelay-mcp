@@ -3,9 +3,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from archforge_blender.agent_permissions import (
-    ARCHFORGE_MCP_RULE, agent_failure, antigravity_mcp_is_allowed, codex_automatic_review_args,
+from blendrelay_blender.agent_permissions import (
+    BLENDRELAY_MCP_RULE, agent_failure, antigravity_mcp_is_allowed, codex_automatic_review_args,
     ensure_antigravity_mcp_permission,
+    ensure_antigravity_mcp_server,
 )
 
 
@@ -15,7 +16,7 @@ class AgentPermissionTests(unittest.TestCase):
         self.assertIn('--approve-for-me',args)
         self.assertNotIn('--sandbox',args)
 
-    def test_adds_only_archforge_rule_and_preserves_settings(self):
+    def test_adds_only_blendrelay_rule_and_preserves_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'settings.json'
             path.write_text(json.dumps({'verbosity':'low','permissions':{'allow':['command(git)']}}))
@@ -23,7 +24,7 @@ class AgentPermissionTests(unittest.TestCase):
             result=json.loads(path.read_text())
             self.assertTrue(changed)
             self.assertEqual(result['verbosity'],'low')
-            self.assertEqual(result['permissions']['allow'],['command(git)',ARCHFORGE_MCP_RULE])
+            self.assertEqual(result['permissions']['allow'],['command(git)',BLENDRELAY_MCP_RULE])
             self.assertTrue(antigravity_mcp_is_allowed(path))
             self.assertFalse(ensure_antigravity_mcp_permission(path)[0])
 
@@ -45,6 +46,27 @@ class AgentPermissionTests(unittest.TestCase):
     def test_blender_job_error_overrides_zero_exit(self):
         failure=agent_failure(0,blender_errors=[{'action':'execute','error':'Traceback\nTypeError: bad argument'}])
         self.assertIn('TypeError: bad argument',failure)
+
+    def test_adds_antigravity_server_and_preserves_others(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'mcp_config.json'
+            path.write_text(json.dumps({'mcpServers': {
+                'other': {'command': 'other.exe', 'args': []},
+            }}))
+            changed, _ = ensure_antigravity_mcp_server(path)
+            result = json.loads(path.read_text())['mcpServers']
+            self.assertTrue(changed)
+            self.assertTrue(result['blendrelay']['command'])
+            self.assertTrue(result['blendrelay']['args'])
+            self.assertIn('other', result)
+            self.assertFalse(ensure_antigravity_mcp_server(path)[0])
+
+    def test_rejects_invalid_antigravity_server_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'mcp_config.json'
+            path.write_text(json.dumps({'mcpServers': []}))
+            with self.assertRaises(RuntimeError):
+                ensure_antigravity_mcp_server(path)
 
 
 if __name__=='__main__':unittest.main()

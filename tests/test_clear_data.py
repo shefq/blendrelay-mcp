@@ -5,17 +5,17 @@ import unittest
 import uuid
 import bpy
 
-from archforge_blender import general
-from archforge_runtime.service import Service
-import archforge_blender
+from blendrelay_blender import general
+from blendrelay_runtime.service import Service
+import blendrelay_blender
 
 
 class ClearDataTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.root = Path(self.tmp.name)
         self.scene = bpy.context.scene
-        self.old_workspace = self.scene.get('archforge_workspace_id')
-        self.scene['archforge_workspace_id'] = uuid.uuid4().hex
+        self.old_workspace = self.scene.get('blendrelay_workspace_id')
+        self.scene['blendrelay_workspace_id'] = uuid.uuid4().hex
         self.workspace = general.workspace_root(self.root, self.scene)
         for name in ('agent_runs','scene_versions','conversations','focused_views','selection_views'):
             folder = self.workspace / name; folder.mkdir(parents=True, exist_ok=True)
@@ -28,8 +28,8 @@ class ClearDataTests(unittest.TestCase):
         (self.root / 'assets' / 'thumbnails' / 'thumb.png').write_bytes(b'data')
 
     def tearDown(self):
-        if self.old_workspace is None: self.scene.pop('archforge_workspace_id', None)
-        else: self.scene['archforge_workspace_id'] = self.old_workspace
+        if self.old_workspace is None: self.scene.pop('blendrelay_workspace_id', None)
+        else: self.scene['blendrelay_workspace_id'] = self.old_workspace
         self.tmp.cleanup()
 
     def test_workspace_identity_is_stable_and_isolated(self):
@@ -60,24 +60,24 @@ class ClearDataTests(unittest.TestCase):
         other = self.root / 'workspaces' / ('b' * 32)
         other.mkdir(parents=True); (other / 'keep.txt').write_text('other scene')
         try:
-            result = service.dispatch('clear_data', {'workspace_id': self.scene['archforge_workspace_id']})
-            self.assertEqual(result['workspace_id'], self.scene['archforge_workspace_id'])
+            result = service.dispatch('clear_data', {'workspace_id': self.scene['blendrelay_workspace_id']})
+            self.assertEqual(result['workspace_id'], self.scene['blendrelay_workspace_id'])
             self.assertEqual(list(self.workspace.glob('*')), [])
             self.assertTrue((other / 'keep.txt').is_file())
             self.assertIn('clear_data', (self.root / 'audit.jsonl').read_text())
         finally: service.store.close()
 
     def test_blender_operator_clears_current_workspace(self):
-        archforge_blender.register()
+        blendrelay_blender.register()
         try:
-            bpy.context.scene.archforge_runtime_dir = str(self.root)
-            from archforge_blender.bridge_ui import STATE
-            STATE['root'] = str(self.root); STATE['workspace_id'] = self.scene['archforge_workspace_id']
+            bpy.context.scene.blendrelay_runtime_dir = str(self.root)
+            from blendrelay_blender.bridge_ui import STATE
+            STATE['root'] = str(self.root); STATE['workspace_id'] = self.scene['blendrelay_workspace_id']
             STATE['versions'] = [{'version_id':'123','label':'Test'}]; STATE['agent_log'] = 'dummy.log'
-            self.assertEqual(bpy.ops.archforge.clear_stored_data(include_assets=False), {'FINISHED'})
+            self.assertEqual(bpy.ops.blendrelay.clear_stored_data(include_assets=False), {'FINISHED'})
             self.assertEqual(STATE['versions'], []); self.assertIsNone(STATE['agent_log'])
             self.assertTrue((self.root / 'blender_jobs' / 'job1.json').is_file())
-        finally: archforge_blender.unregister()
+        finally: blendrelay_blender.unregister()
 
 
 if __name__ == '__main__': unittest.main()

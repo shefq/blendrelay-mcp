@@ -1,8 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
-from archforge_runtime.errors import ArchForgeError
-from archforge_runtime.service import Service
+from blendrelay_runtime.errors import BlendRelayError
+from blendrelay_runtime.service import Service
 
 
 class RuntimeTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class RuntimeTests(unittest.TestCase):
             service = Service(Path(directory) / 'runtime', [directory])
             result = service.rpc_source_register(str(source))
             self.assertTrue(Path(result['path']).is_file())
-            with self.assertRaises(ArchForgeError):
+            with self.assertRaises(BlendRelayError):
                 service.rpc_source_register(str(Path(directory).parent / 'outside.png'))
 
 

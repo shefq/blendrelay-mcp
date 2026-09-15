@@ -1,48 +1,121 @@
-# ArchForge MCP
+# BlendRelay MCP
 
-ArchForge MCP connects local AI agents to Blender 4.5. It can inspect and change arbitrary Blender files for modeling, sculpting, shading, rigging, animation, Geometry Nodes, simulations, lighting, rendering, compositing, video editing, scene organization and automation.
+**General-purpose AI agent control for Blender through MCP**
 
-The Blender sidebar provides prompts, reference images, viewport sketches, target regions, selection context, quality profiles, permissions and full-file recovery checkpoints. MCP tools perform the actual work.
+BlendRelay MCP connects local AI agents to Blender 4.5+. It can inspect and change arbitrary Blender files for modeling, sculpting, shading, rigging, animation, Geometry Nodes, simulations, lighting, rendering, compositing, video editing, scene organization and automation.
 
-## Setup
+The Blender sidebar (**BlendRelay**) provides prompts, reference images, viewport sketches, target regions, selection context, quality profiles, permissions, and full-file recovery checkpoints. MCP tools perform the actual work.
 
-Install the package from this repository and link or install `src/archforge_blender` as the Blender extension. Both the add-on and runtime use `%LOCALAPPDATA%\ArchForgeMCP` by default. This is the shared runtime root. Scene-specific data is stored in `workspaces/<workspace-id>/`; the ID is saved inside the `.blend`, so reopening the file reuses its workspace while a new Blender scene receives a new one. The shared asset cache and authenticated runtime transport stay at the root.
+---
+
+## Quick Start & Setup
+
+### 1. Install & Setup
+
+You can run BlendRelay MCP directly via `uvx` or install via `pip`:
 
 ```powershell
-archforge-runtime serve
+# Run setup to initialize directories and install the bundled Blender extension
+uvx blendrelay-mcp setup
+
+# Or if installed via pip:
+pip install blendrelay-mcp
+blendrelay-mcp setup
 ```
 
-Configure the MCP client to run `archforge-mcp`. In Blender, open **3D View → ArchForge** and choose **Connect / Refresh**.
+To run diagnostics and verify your environment:
 
-## Blender tools
+```powershell
+blendrelay-mcp doctor
+```
+
+### 2. Configure MCP Client
+
+Add BlendRelay MCP to your MCP client configuration (Claude Desktop, Cursor, Antigravity, etc.):
+
+```json
+{
+  "mcpServers": {
+    "blendrelay": {
+      "command": "uvx",
+      "args": ["blendrelay-mcp"]
+    }
+  }
+}
+```
+
+Or using standard python:
+
+```json
+{
+  "mcpServers": {
+    "blendrelay": {
+      "command": "python",
+      "args": ["-m", "blendrelay_mcp.cli", "mcp"]
+    }
+  }
+}
+```
+
+### 3. Enable Extension in Blender
+
+1. Open Blender.
+2. In **Edit → Preferences → Get Extensions / Add-ons**, enable **BlendRelay MCP**.
+3. In the 3D Viewport sidebar (press `N`), switch to the **BlendRelay** tab.
+4. Click **Connect / Refresh**.
+
+---
+
+## Data & Migration
+
+- **Shared Runtime Root**: `%LOCALAPPDATA%\BlendRelayMCP` (customizable via `BLENDRELAY_DATA_DIR`).
+- **Workspaces**: Scene-specific data is saved in `workspaces/<workspace-id>/`. The workspace ID is stored inside the `.blend` file (`blendrelay_workspace_id`).
+
+---
+
+## CLI Commands
+
+The unified `blendrelay-mcp` CLI provides:
+
+- `blendrelay-mcp` or `blendrelay-mcp mcp`: Start the MCP stdio gateway server.
+- `blendrelay-mcp setup [--target <path> | --blender-version <version>]`: Migrate data and install into the newest compatible Blender by default.
+- `blendrelay-mcp doctor [--strict]`: Validate Python, extension, and runtime health with a meaningful exit status.
+- `blendrelay-mcp install-addon [--target <path> | --blender-version <version>]`: Install the bundled extension.
+- `blendrelay-mcp runtime serve`: Run the background loopback runtime service manually.
+
+---
+
+## Blender Tools
 
 - `get_scene_info`, `get_object_info`, `inspect_scene`, and `inspect_blender_data` provide bounded structured context.
-- `mesh_edit` offers validated common mesh operations.
-- `build_scene_batch` handles common objects, materials, lights, cameras, transforms, parenting, modifiers, duplication, deletion and keyframes.
-- `execute_blender_python` exposes the full Blender Python API for capabilities that do not have a typed tool.
-- `capture_viewport` and `capture_focused_view` provide visual verification.
-- Scene checkpoints, restoration, asset discovery/import and asynchronous job tools remain separate.
+- `mesh_edit` offers validated common mesh operations (extrude, inset, bevel, bridge, etc.).
+- `build_scene_batch` handles objects, materials, lights, cameras, transforms, parenting, modifiers, duplication, deletion, and keyframes.
+- `execute_blender_python` exposes the full Blender Python API with `br` helpers.
+- `capture_viewport` and `capture_focused_view` provide visual verification and multi-angle framing.
+- `blendrelay_blender_sessions`, `blendrelay_blender_job`, `blendrelay_get_capabilities`, `blendrelay_register_source`, and `blendrelay_read_artifact` manage session lifecycles, background jobs, and artifacts.
+- Scene checkpoints and restoration allow non-destructive undo and safety recovery.
 
-Prompts can start from Object, Edit, Pose, Sculpt, Paint and other Blender modes. ArchForge supplies the current mode and available selection context to the agent and asks it to restore the working mode after an operation.
+---
 
-## Workflows and verification
+## Workflows and Verification
 
-Auto mode classifies requests as creation, focused editing, shading, rigging, animation, nodes, simulation, rendering, compositing, sculpting or data management. Each category receives appropriate instructions and acceptance checks. Visual scene-completion rules are used only when the requested result needs them.
+- **Workflows**: Auto mode classifies requests into creation, focused editing, shading, rigging, animation, nodes, simulation, rendering, compositing, sculpting, or data management.
+- **Profiles**: Four workload profiles control budgets: Focused Task, Full Creation, Creation + Assets, and Complex Production. Finish quality can be set from Draft to Maximum.
+- **Checkpoints**: BlendRelay automatically creates recovery checkpoints before an AI execution and a final checkpoint upon successful completion.
+- **Asset Library**: Searches local caches, Poly Haven, and Poly Pizza under the active license policy.
 
-Four workload profiles control the starting and emergency MCP budgets: Focused Task, Full Creation, Creation + Assets and Complex Production. Draft, Standard, High and Maximum control finish quality separately. Allowances expand while accepted work succeeds.
+---
 
-ArchForge saves a recovery checkpoint before an AI run and a final checkpoint after successful completion. Arbitrary Python and unattended provider permissions remain visible scene-level controls.
+## Testing
 
-## Asset Library
-
-The optional Asset Library searches the local cache, Poly Haven and Poly Pizza under the active license policy. Imported assets retain source and attribution metadata. If no suitable asset is available, the agent can construct content procedurally or reuse existing Blender data.
-
-## Runtime and MCP
-
-The gateway supports MCP `2026-07-28`, bounded JSON schemas, task lifecycle operations, authenticated loopback communication, operation receipts, audit logging, job expiry and polling limits. Runtime token files receive current-user-only Windows ACLs.
-
-Run tests with:
+Run the test suite with:
 
 ```powershell
 python -B -m unittest discover -s tests -p "test_*.py" -v
+```
+
+Build the extension package:
+
+```powershell
+python tools/build_extension.py
 ```

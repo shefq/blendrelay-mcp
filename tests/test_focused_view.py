@@ -2,7 +2,7 @@
 import tempfile
 import unittest
 import bpy
-from archforge_blender import focused_view, general
+from blendrelay_blender import focused_view, general
 
 
 class FocusedViewTests(unittest.TestCase):

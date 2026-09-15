@@ -37,7 +37,7 @@ for retry safety.
 
 ## Structured mesh actions
 
-Use archforge_blender_command with action=mesh_edit and arguments containing
+Use mesh_edit (or blendrelay_blender_job with action=mesh_edit) and arguments containing
 operation: bevel, extrude, inset, bridge, move_normal, or assign_material.
 distance is in **local mesh units**, not automatically metres, and segments is
 1–64. Material assignment takes an existing material name. These actions operate
@@ -49,7 +49,7 @@ accepts names or defaults to selected mesh objects.
 ## Conversation and usage
 
 Continue conversation is optional and defaults off. When enabled, IDs are saved
-per ArchForge workspace ID and backend under the runtime conversations directory.
+per BlendRelay workspace ID and backend under the runtime conversations directory.
 Codex uses exec resume with the explicit ID; Antigravity uses --conversation.
 New Conversation clears the ID for that backend without deleting the old history.
 Scene versions sharing the workspace ID share the conversation, with fresh scene
@@ -68,7 +68,7 @@ real task comparison; tests do not launch paid agent runs.
 The focused prompt tells the agent not to search old logs, source, or unrelated
 files. This is **not a filesystem sandbox**. CLI permissions govern separate shell
 and file tools; unrestricted Blender Python can also access files. Existing CLI
-permissions are unchanged. ArchForge does not claim to enforce filesystem denial
+permissions are unchanged. BlendRelay does not claim to enforce filesystem denial
 or strict selected-only mutation for arbitrary scripts.
 
 Only the repository is updated. Reload/restart the addon and MCP gateway/runtime
