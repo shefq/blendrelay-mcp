@@ -102,7 +102,7 @@ HUD_STATE = {
 }
 
 
-HUD_BASE_HEIGHT = 126.0
+HUD_BASE_HEIGHT = 160.0
 HUD_DESIGN_WIDTH = 780.0
 HUD_VIEWPORT_MARGIN = 24.0
 HUD_AUTO_WIDTH_FRACTION = 0.55
@@ -295,6 +295,28 @@ def _truncate_left(text, max_w, size=13):
     return ellipsis + text
 
 
+def _wrap_prompt_text(text, max_w, size=13, max_lines=3):
+    """Wrap a prompt for the HUD while keeping the newest text visible."""
+    font_id = 0
+    blf.size(font_id, max(9, int(size)))
+    lines = []
+    for paragraph in text.splitlines() or ['']:
+        words = paragraph.split() or ['']
+        line = ''
+        for word in words:
+            candidate = word if not line else f'{line} {word}'
+            if line and blf.dimensions(font_id, candidate)[0] > max_w:
+                lines.append(line)
+                line = word
+            else:
+                line = candidate
+        lines.append(line)
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+        lines[0] = _truncate_left(lines[0], max_w, size=size)
+    return lines
+
+
 # ── Main 2D Drawing Callback ────────────────────────────────────────────────
 
 def draw_viewport_hud():
@@ -313,7 +335,6 @@ def draw_viewport_hud():
     agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
     is_running = bool(bridge_ui.STATE.get('agent_process') or bridge_ui.STATE.get('codex_process'))
     only_selected = getattr(scene, 'blendrelay_only_selected', False)
-    active_tab = getattr(scene, 'blendrelay_ui_tab', 'GENERATE')
 
     # Dynamic model friendly name
     cur_model = _get_selected_model(scene, agent)
@@ -473,50 +494,16 @@ def draw_viewport_hud():
     )
     _draw_text_centered("−", btn_zm_x, top_y, btn_z_w, top_h, size=12 * scale, color=(0.9, 0.95, 1.0, 1.0))
 
-    # Mode Tabs (Generate, Sketch, Versions, Settings)
-    tabs = [
-        ('GENERATE', '✦ Generate'),
-        ('SKETCH', 'Sketch & Region'),
-        ('HISTORY', '⏱ Versions'),
-        ('SETTINGS', '⚙ Settings'),
-    ]
-    tab_w = 76.0 * scale
-    tabs_start_x = hud_x + (hud_w - 316.0 * scale) / 2.0
-    for i, (tid, tlabel) in enumerate(tabs):
-        tx = tabs_start_x + i * (tab_w + 4.0 * scale)
-        bounds[f'tab_{tid}'] = (tx, top_y, tab_w, top_h)
-        is_active = (active_tab == tid)
-        is_t_hover = (hover == f'tab_{tid}')
-
-        if is_active:
-            _draw_rounded_box(
-                tx, top_y, tab_w, top_h, 12.0 * scale,
-                fill_color=(0.18, 0.26, 0.38, 0.95),
-                border_color=(0.0, 0.75, 1.0, 0.7),
-                border_width=max(0.8, 1.0 * scale),
-            )
-            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=(8 if tid == 'SKETCH' else 11) * scale, color=(1.0, 1.0, 1.0, 1.0))
-        elif is_t_hover:
-            _draw_rounded_box(
-                tx, top_y, tab_w, top_h, 12.0 * scale,
-                fill_color=(0.13, 0.17, 0.23, 0.9),
-                border_color=(0.30, 0.40, 0.55, 0.6),
-                border_width=max(0.8, 1.0 * scale),
-            )
-            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=(8 if tid == 'SKETCH' else 11) * scale, color=(0.88, 0.92, 0.98, 1.0))
-        else:
-            _draw_text_centered(tlabel, tx, top_y, tab_w, top_h, size=(8 if tid == 'SKETCH' else 11) * scale, color=(0.60, 0.66, 0.75, 1.0))
-
-    # ── 3. Middle Bar: Prompt Field & Main Action Button ──────────────────────
-    mid_y = hud_y + 45.0 * scale
-    mid_h = 38.0 * scale
+    # ── 3. Multi-line Prompt Field & Main Action Button ──────────────────────
+    mid_y = hud_y + 47.0 * scale
+    mid_h = 68.0 * scale
 
     btn_w = 136.0 * scale
     btn_x = hud_x + hud_w - btn_w - 14.0 * scale
     bounds['btn_action'] = (btn_x, mid_y, btn_w, mid_h)
     btn_hover = (hover == 'btn_action')
 
-    # Action Buttons: Run Agent & Verify/Fix (or Stop Task when running)
+    # Action Button: Run Agent (or Stop Task when running)
     prompt_x = hud_x + 14.0 * scale
     if is_running:
         btn_w = 140.0 * scale
@@ -533,25 +520,9 @@ def draw_viewport_hud():
         _draw_text_centered("✖ STOP TASK", btn_x, mid_y, btn_w, mid_h, size=12 * scale, color=(1.0, 1.0, 1.0, 1.0))
         prompt_w = btn_x - prompt_x - 10.0 * scale
     else:
-        btn_run_w = 114.0 * scale
-        btn_fix_w = 104.0 * scale
-        btn_gap = 6.0 * scale
+        btn_run_w = 132.0 * scale
         btn_run_x = hud_x + hud_w - btn_run_w - 14.0 * scale
-        btn_fix_x = btn_run_x - btn_fix_w - btn_gap
         bounds['btn_action'] = (btn_run_x, mid_y, btn_run_w, mid_h)
-        bounds['btn_fix'] = (btn_fix_x, mid_y, btn_fix_w, mid_h)
-
-        # Draw Verify & Fix Button
-        f_hover = (hover == 'btn_fix')
-        f_fill = (0.24, 0.14, 0.38, 0.95) if f_hover else (0.13, 0.09, 0.22, 0.90)
-        f_border = (0.85, 0.45, 1.0, 0.95) if f_hover else (0.55, 0.28, 0.85, 0.75)
-        _draw_rounded_box(
-            btn_fix_x, mid_y, btn_fix_w, mid_h, 10.0 * scale,
-            fill_color=f_fill,
-            border_color=f_border,
-            border_width=max(1.0, 1.3 * scale),
-        )
-        _draw_text_centered("👁 VERIFY & FIX", btn_fix_x, mid_y, btn_fix_w, mid_h, size=10.5 * scale, color=(0.94, 0.86, 1.0, 1.0))
 
         # Draw Run Agent Button
         run_hover = (hover == 'btn_action')
@@ -565,7 +536,7 @@ def draw_viewport_hud():
         )
         _draw_text_centered("✦ RUN AGENT", btn_run_x, mid_y, btn_run_w, mid_h, size=11.5 * scale, color=(1.0, 1.0, 1.0, 1.0))
 
-        prompt_w = btn_fix_x - prompt_x - 10.0 * scale
+        prompt_w = btn_run_x - prompt_x - 10.0 * scale
 
     # Prompt Text Input Box
     bounds['prompt'] = (prompt_x, mid_y, prompt_w, mid_h)
@@ -584,7 +555,7 @@ def draw_viewport_hud():
     if prompt_text:
         clear_w = 22.0 * scale
         clear_x = prompt_x + prompt_w - clear_w - 6.0 * scale
-        clear_y = mid_y + (mid_h - 22.0 * scale) / 2.0
+        clear_y = mid_y + mid_h - 28.0 * scale
         bounds['prompt_clear'] = (clear_x, clear_y, clear_w, 22.0 * scale)
         clr_hover = (hover == 'prompt_clear')
         _draw_rounded_box(
@@ -596,42 +567,34 @@ def draw_viewport_hud():
     else:
         max_text_w = prompt_w - 18.0 * scale
 
-    # Reference image pill inside prompt box if attached
+    # Keep attached-image context in the bottom control row so the prompt has
+    # its full width for writing a multi-line instruction.
     from . import bridge_ui
     ref_images = bridge_ui.reference_images(scene)
     ref_image = ref_images[0] if ref_images else ''
     has_ref = bool(ref_image)
-    if has_ref:
-        img_pill_name = Path(ref_image).name + (f' +{len(ref_images) - 1}' if len(ref_images) > 1 else '')
-        pill_w = min(110.0 * scale, (len(img_pill_name[:10]) * 7.0 + 36.0) * scale)
-        pill_x = prompt_x + 8.0 * scale
-        pill_y = mid_y + (mid_h - 22.0 * scale) / 2.0
-        _draw_rounded_box(
-            pill_x, pill_y, pill_w, 22.0 * scale, 10.0 * scale,
-            fill_color=(0.06, 0.24, 0.18, 0.95),
-            border_color=(0.15, 0.85, 0.50, 0.8),
-            border_width=max(0.8, 1.0 * scale),
-        )
-        _draw_text(f"🖼 {img_pill_name[:10]}", pill_x + 6.0 * scale, pill_y + 5.0 * scale, size=10 * scale, color=(0.4, 1.0, 0.7, 1.0))
-        text_start_x = pill_x + pill_w + 6.0 * scale
-        avail_text_w = max_text_w - pill_w - 6.0 * scale
-    else:
-        text_start_x = prompt_x + 12.0 * scale
-        avail_text_w = max_text_w
+    text_start_x = prompt_x + 12.0 * scale
+    avail_text_w = max_text_w
 
-    # Draw Prompt Content or Placeholder
-    text_y = mid_y + 13.0 * scale
+    # Draw Prompt Content or Placeholder. Shift+Enter inserts a new line;
+    # Enter continues to run the prompt for fast single-line workflows.
+    line_h = 16.0 * scale
+    text_y = mid_y + mid_h - 22.0 * scale
     if not prompt_text and not is_typing:
-        _draw_text("Prompt AI agent to create or modify scene / selected objects...", text_start_x, text_y, size=13 * scale, color=(0.42, 0.48, 0.58, 1.0))
+        _draw_text("Describe what you want to create or change…", text_start_x, text_y, size=13 * scale, color=(0.42, 0.48, 0.58, 1.0))
+        _draw_text("Shift+Enter for a new line · Enter to run", text_start_x, text_y - line_h, size=10 * scale, color=(0.30, 0.36, 0.46, 1.0))
     else:
-        disp_text = _truncate_left(prompt_text, avail_text_w, size=13 * scale)
-        _draw_text(disp_text, text_start_x, text_y, size=13 * scale, color=(0.95, 0.97, 1.0, 1.0))
+        prompt_lines = _wrap_prompt_text(prompt_text, avail_text_w, size=13 * scale)
+        for index, line in enumerate(prompt_lines):
+            _draw_text(line, text_start_x, text_y - index * line_h, size=13 * scale, color=(0.95, 0.97, 1.0, 1.0))
 
         if is_typing and (int(time.monotonic() * 2.5) % 2 == 0):
             font_id = 0
             blf.size(font_id, max(9, int(13 * scale)))
-            tw, _ = blf.dimensions(font_id, disp_text)
-            _draw_text('|', text_start_x + tw + 2.0 * scale, text_y, size=13 * scale, color=(0.0, 0.85, 1.0, 1.0))
+            last_line = prompt_lines[-1] if prompt_lines else ''
+            tw, _ = blf.dimensions(font_id, last_line)
+            cursor_y = text_y - (len(prompt_lines) - 1) * line_h
+            _draw_text('|', text_start_x + tw + 2.0 * scale, cursor_y, size=13 * scale, color=(0.0, 0.85, 1.0, 1.0))
 
     # ── 4. Bottom Bar: Control Chips ─────────────────────────────────────────
     bot_y = hud_y + 11.0 * scale
@@ -746,45 +709,6 @@ def draw_viewport_hud():
     )
     _draw_text_centered(scope_text, cur_x, bot_y, c3_w, chip_h, size=11 * scale, color=scope_color)
     cur_x += c3_w + 6.0 * scale
-
-    # Chip 4: Save Checkpoint [💾 Checkpoint]
-    c4_w = 110.0 * scale
-    bounds['chip_checkpoint'] = (cur_x, bot_y, c4_w, chip_h)
-    c4_hover = (hover == 'chip_checkpoint')
-    _draw_rounded_box(
-        cur_x, bot_y, c4_w, chip_h, 12.0 * scale,
-        fill_color=(0.14, 0.18, 0.26, 0.95) if c4_hover else (0.09, 0.12, 0.18, 0.85),
-        border_color=(0.28, 0.38, 0.55, 0.8),
-        border_width=max(0.8, 1.0 * scale),
-    )
-    _draw_text_centered("💾 Checkpoint", cur_x, bot_y, c4_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
-    cur_x += c4_w + 6.0 * scale
-
-    # Chip 5: Sketch Viewport [✎ Sketch]
-    c5_w = 94.0 * scale
-    bounds['chip_sketch'] = (cur_x, bot_y, c5_w, chip_h)
-    c5_hover = (hover == 'chip_sketch')
-    _draw_rounded_box(
-        cur_x, bot_y, c5_w, chip_h, 12.0 * scale,
-        fill_color=(0.14, 0.18, 0.26, 0.95) if c5_hover else (0.09, 0.12, 0.18, 0.85),
-        border_color=(0.28, 0.38, 0.55, 0.8),
-        border_width=max(0.8, 1.0 * scale),
-    )
-    _draw_text_centered("✎ Sketch", cur_x, bot_y, c5_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
-    cur_x += c5_w + 6.0 * scale
-
-    # Chip 6: Quick Preset Suggestions [+ Preset ⌵]
-    c6_w = 94.0 * scale
-    if cur_x + c6_w < hud_x + hud_w - 30.0 * scale:
-        bounds['chip_preset'] = (cur_x, bot_y, c6_w, chip_h)
-        c6_hover = (hover == 'chip_preset')
-        _draw_rounded_box(
-            cur_x, bot_y, c6_w, chip_h, 12.0 * scale,
-            fill_color=(0.14, 0.18, 0.26, 0.95) if c6_hover else (0.09, 0.12, 0.18, 0.85),
-            border_color=(0.28, 0.38, 0.55, 0.8),
-            border_width=max(0.8, 1.0 * scale),
-        )
-        _draw_text_centered("+ Preset ⌵", cur_x, bot_y, c6_w, chip_h, size=11 * scale, color=(0.88, 0.92, 0.98, 1.0))
 
     # Flash notification message
     now = time.monotonic()
@@ -929,11 +853,9 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
             # Prioritize interactive buttons and resize handles
             check_keys = (
                 'resize_corner', 'resize_left', 'resize_right',
-                'btn_action', 'btn_fix', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
+                'btn_action', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
                 'scale_up', 'scale_down', 'scale_reset',
-                'chip_backend', 'chip_model', 'chip_verify', 'chip_image_clear', 'chip_image', 'chip_scope', 'chip_checkpoint',
-                'chip_sketch', 'chip_preset',
-                'tab_GENERATE', 'tab_SKETCH', 'tab_HISTORY', 'tab_SETTINGS',
+                'chip_backend', 'chip_model', 'chip_verify', 'chip_image_clear', 'chip_image', 'chip_scope',
                 'header_drag',
             )
             for key in check_keys:
@@ -964,9 +886,12 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
 
             elif event.type in ('RET', 'NUMPAD_ENTER') and event.value == 'PRESS':
-                HUD_STATE['typing'] = False
-                if context.scene.blendrelay_codex_prompt.strip():
-                    bpy.ops.blendrelay.send_to_agent()
+                if event.shift:
+                    context.scene.blendrelay_codex_prompt += '\n'
+                else:
+                    HUD_STATE['typing'] = False
+                    if context.scene.blendrelay_codex_prompt.strip():
+                        bpy.ops.blendrelay.send_to_agent()
                 target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
@@ -1000,7 +925,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 except Exception:
                     pass
                 if raw_clip:
-                    clean_clip = raw_clip.replace('\r\n', ' ').replace('\n', ' ')
+                    clean_clip = raw_clip.replace('\r\n', '\n')
                     context.scene.blendrelay_codex_prompt += clean_clip
                     target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
@@ -1092,13 +1017,6 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                # 3b. Verify & Fix Button
-                if is_inside(bounds.get('btn_fix')):
-                    HUD_STATE['typing'] = False
-                    bpy.ops.blendrelay.verify_and_fix()
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
                 # 4. Prompt Input Area (Focus typing)
                 if is_inside(bounds.get('prompt')):
                     if is_inside(bounds.get('prompt_clear')):
@@ -1168,47 +1086,14 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                # 9. Checkpoint Chip (Save Version immediately)
-                if is_inside(bounds.get('chip_checkpoint')):
-                    bpy.ops.blendrelay.checkpoint()
-                    HUD_STATE['flash_msg'] = '✔ Checkpoint saved!'
-                    HUD_STATE['flash_time'] = time.monotonic()
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # 10. Sketch Chip (Start Viewport Sketching)
-                if is_inside(bounds.get('chip_sketch')):
-                    bpy.ops.blendrelay.draw_viewport_sketch()
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # 11. Preset Suggestions (+ Tag)
-                if is_inside(bounds.get('chip_preset')):
-                    preset = PRESETS[HUD_STATE['preset_idx'] % len(PRESETS)]
-                    HUD_STATE['preset_idx'] += 1
-                    cur = context.scene.blendrelay_codex_prompt.strip()
-                    if not cur:
-                        context.scene.blendrelay_codex_prompt = preset
-                    elif preset.lower() not in cur.lower():
-                        context.scene.blendrelay_codex_prompt = f"{cur}, {preset}"
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # 12. Header Mode Tabs (Generate, Sketch, Versions, Settings)
-                for tid in ('GENERATE', 'SKETCH', 'HISTORY', 'SETTINGS'):
-                    if is_inside(bounds.get(f'tab_{tid}')):
-                        context.scene.blendrelay_ui_tab = tid
-                        target_area.tag_redraw()
-                        return {'RUNNING_MODAL'}
-
-                # 13. Console Toggle Button
+                # 9. Console Toggle Button
                 if is_inside(bounds.get('btn_console')):
                     if hasattr(bpy.ops.wm, 'console_toggle'):
                         bpy.ops.wm.console_toggle()
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                # 14. Close Button
+                # 10. Close Button
                 if is_inside(bounds.get('btn_close')):
                     context.scene.blendrelay_show_viewport_hud = False
                     HUD_STATE['modal_active'] = False
