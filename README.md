@@ -6,22 +6,29 @@ BlendRelay MCP connects local AI agents to Blender 4.5+. It can inspect and chan
 
 The Blender sidebar (**BlendRelay**) provides prompts, reference images, viewport sketches, target regions, selection context, quality profiles, permissions, and full-file recovery checkpoints. MCP tools perform the actual work.
 
+## Requirements
+
+- Blender 4.5 or newer.
+- Python 3.11 or newer and `uvx` (recommended) or `pip` for installation.
+- Prompts sent from Blender currently require a signed-in OpenAI Codex CLI or Google Antigravity CLI. Install only the backend you intend to use.
+- Claude Desktop, Claude Code, Cursor, and other MCP clients can connect directly to BlendRelay without Codex or Antigravity.
+
 ---
 
 ## Quick Start & Setup
 
 ### 1. Install & Setup
 
-You can run BlendRelay MCP directly via `uvx` or install via `pip`:
+BlendRelay MCP is currently in local development and has not yet been published to PyPI:
 
 ```powershell
-# Run setup to initialize directories and install the bundled Blender extension
-uvx blendrelay-mcp setup
-
-# Or if installed via pip:
-pip install blendrelay-mcp
+git clone https://github.com/shefq/blendrelay-mcp.git
+cd blendrelay-mcp
+python -m pip install -e .
 blendrelay-mcp setup
 ```
+
+After the first PyPI release, users can install it with `uvx blendrelay-mcp setup` or `pip install blendrelay-mcp`.
 
 To run diagnostics and verify your environment:
 
@@ -31,7 +38,20 @@ blendrelay-mcp doctor
 
 ### 2. Configure MCP Client
 
-Add BlendRelay MCP to your MCP client configuration (Claude Desktop, Cursor, Antigravity, etc.):
+Add BlendRelay MCP to your MCP client configuration (Claude Desktop, Claude Code, Cursor, Antigravity, etc.):
+
+```json
+{
+  "mcpServers": {
+    "blendrelay": {
+      "command": "python",
+      "args": ["-m", "blendrelay_mcp.cli", "mcp"]
+    }
+  }
+}
+```
+
+After the PyPI release, clients can instead launch it through `uvx`:
 
 ```json
 {
@@ -44,17 +64,11 @@ Add BlendRelay MCP to your MCP client configuration (Claude Desktop, Cursor, Ant
 }
 ```
 
-Or using standard python:
+For Claude Code during local development:
 
-```json
-{
-  "mcpServers": {
-    "blendrelay": {
-      "command": "python",
-      "args": ["-m", "blendrelay_mcp.cli", "mcp"]
-    }
-  }
-}
+```powershell
+claude mcp add --scope user blendrelay -- python -m blendrelay_mcp.cli mcp
+claude mcp list
 ```
 
 ### 3. Enable Extension in Blender

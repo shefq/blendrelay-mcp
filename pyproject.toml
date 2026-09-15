@@ -8,8 +8,23 @@ dynamic = ["version"]
 description = "General-purpose MCP server and AI workflow extension for Blender"
 requires-python = ">=3.11"
 readme = "README.md"
-license = {text = "MIT AND GPL-3.0-or-later"}
+license = "MIT AND GPL-3.0-or-later"
+license-files = ["LICENSE", "src/blendrelay_blender/COPYING.txt"]
 dependencies = []
+keywords = ["blender", "mcp", "model-context-protocol", "ai", "3d"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Plugins",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+[project.urls]
+Homepage = "https://github.com/shefq/blendrelay-mcp"
+Repository = "https://github.com/shefq/blendrelay-mcp"
+Issues = "https://github.com/shefq/blendrelay-mcp/issues"
 
 [project.scripts]
 blendrelay-mcp = "blendrelay_mcp.cli:main"
