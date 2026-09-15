@@ -4,12 +4,15 @@
 
 BlendRelay MCP connects local AI agents to Blender 4.5+. It can inspect and change arbitrary Blender files for modeling, sculpting, shading, rigging, animation, Geometry Nodes, simulations, lighting, rendering, compositing, video editing, scene organization and automation.
 
+Install it from [PyPI](https://pypi.org/project/blendrelay-mcp/).
+
 The Blender sidebar (**BlendRelay**) provides prompts, reference images, viewport sketches, target regions, selection context, quality profiles, permissions, and full-file recovery checkpoints. MCP tools perform the actual work.
 
 ## Requirements
 
 - Blender 4.5 or newer.
-- Python 3.11 or newer and `uvx` (recommended) or `pip` for installation.
+- Blender must have been opened once so its user configuration directory exists.
+- `uvx` (recommended) or Python 3.11+ with `pip`.
 - Prompts sent from Blender currently require a signed-in OpenAI Codex CLI or Google Antigravity CLI. Install only the backend you intend to use.
 - Claude Desktop, Claude Code, Cursor, and other MCP clients can connect directly to BlendRelay without Codex or Antigravity.
 
@@ -19,7 +22,22 @@ The Blender sidebar (**BlendRelay**) provides prompts, reference images, viewpor
 
 ### 1. Install & Setup
 
-BlendRelay MCP is currently in local development and has not yet been published to PyPI:
+Install the published package and its bundled Blender extension:
+
+```powershell
+uvx blendrelay-mcp setup
+```
+
+Or install it with `pip`:
+
+```powershell
+python -m pip install blendrelay-mcp
+blendrelay-mcp setup
+```
+
+`setup` creates BlendRelay's local runtime directory and installs the bundled extension into the newest supported Blender installation it finds. Use `blendrelay-mcp install-addon --blender-version 4.5` to target a specific Blender version.
+
+For development from source:
 
 ```powershell
 git clone https://github.com/shefq/blendrelay-mcp.git
@@ -27,8 +45,6 @@ cd blendrelay-mcp
 python -m pip install -e .
 blendrelay-mcp setup
 ```
-
-After the first PyPI release, users can install it with `uvx blendrelay-mcp setup` or `pip install blendrelay-mcp`.
 
 To run diagnostics and verify your environment:
 
@@ -51,17 +67,24 @@ Add BlendRelay MCP to your MCP client configuration (Claude Desktop, Claude Code
 }
 ```
 
-After the PyPI release, clients can instead launch it through `uvx`:
+For the published package, clients can launch it through `uvx`:
 
 ```json
 {
   "mcpServers": {
     "blendrelay": {
       "command": "uvx",
-      "args": ["blendrelay-mcp"]
+      "args": ["blendrelay-mcp", "mcp"]
     }
   }
 }
+```
+
+For Claude Code with the published package:
+
+```powershell
+claude mcp add --scope user blendrelay -- uvx blendrelay-mcp mcp
+claude mcp list
 ```
 
 For Claude Code during local development:
