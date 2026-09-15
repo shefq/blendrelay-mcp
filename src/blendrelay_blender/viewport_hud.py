@@ -37,17 +37,16 @@ HUD_STATE = {
 HUD_BASE_HEIGHT = 122.0
 HUD_DESIGN_WIDTH = 780.0
 HUD_VIEWPORT_MARGIN = 24.0
-HUD_AUTO_WIDTH_FRACTION = 0.55
+HUD_AUTO_WIDTH_FRACTION = 0.80
 HUD_AUTO_SCALE_MIN = 0.50
-HUD_AUTO_SCALE_MAX = 1.45
+HUD_AUTO_SCALE_MAX = 1.35
 
 
 def _hud_layout_metrics(viewport_width, viewport_height, manual_width, user_scale, adaptive=True):
     """Return a HUD size that remains usable in the available viewport.
 
-    Automatic mode uses a balanced proportion of the active 3D viewport and
-    derives the visual scale from it. Its scale range avoids tiny controls on
-    high-DPI displays and an oversized HUD on ultrawide screens. Manual mode
+    Automatic mode uses an adaptive width (taking 80% of the active 3D viewport width)
+    and an adaptive scale derived from the viewport dimensions. Manual mode
     preserves the user's chosen width. Both modes always fit within the
     available width and height.
     """
@@ -61,26 +60,28 @@ def _hud_layout_metrics(viewport_width, viewport_height, manual_width, user_scal
     available_h = max(1.0, rh - HUD_VIEWPORT_MARGIN)
 
     if adaptive:
-        # Use the same design width at every resolution. Scaling both axes
-        # from the viewport width keeps text and controls comfortably sized on
-        # high-DPI displays while retaining the exact visual proportions.
-        base_width = HUD_DESIGN_WIDTH
+        # Both width and scale are adaptive; width takes 80% of viewport width
         target_width = min(available_w, rw * HUD_AUTO_WIDTH_FRACTION)
         viewport_scale = max(
             HUD_AUTO_SCALE_MIN,
-            min(HUD_AUTO_SCALE_MAX, target_width / base_width),
+            min(HUD_AUTO_SCALE_MAX, (rw / 1440.0) ** 0.5),
         )
         requested_scale = viewport_scale * user_scale
+        fit = min(1.0, available_w / target_width, available_h / (HUD_BASE_HEIGHT * requested_scale))
+        effective_scale = requested_scale * fit
+        width = min(available_w, target_width * fit)
+        base_width = width / max(0.001, effective_scale)
     else:
         base_width = max(500.0, min(4000.0, float(manual_width)))
         requested_scale = user_scale
+        fit = min(1.0, available_w / (base_width * requested_scale), available_h / (HUD_BASE_HEIGHT * requested_scale))
+        effective_scale = requested_scale * fit
+        width = base_width * effective_scale
 
-    fit = min(1.0, available_w / (base_width * requested_scale), available_h / (HUD_BASE_HEIGHT * requested_scale))
-    effective_scale = requested_scale * fit
     return {
         'base_width': base_width,
         'scale': effective_scale,
-        'width': base_width * effective_scale,
+        'width': width,
         'height': HUD_BASE_HEIGHT * effective_scale,
         'auto_scaled': adaptive or fit < 0.999,
     }

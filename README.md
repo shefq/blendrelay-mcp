@@ -1,4 +1,4 @@
-# BlendRelay MCP
+# BlendRelay MCP — Create and Edit Blender Scenes with AI
 
 **A Blender AI add-on and Blender MCP server for creating and editing 3D scenes with natural-language prompts.**
 

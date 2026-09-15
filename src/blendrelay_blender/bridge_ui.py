@@ -1544,17 +1544,7 @@ class BR_PT_Main(bpy.types.Panel):
 
             prompt_card.prop(scene, 'blendrelay_codex_prompt', text='')
 
-            # Quick Tag Chips
-            tags_row = prompt_card.row(align=True)
-            tags_row.scale_y = 0.85
-            tags = [
-                ('+ Realistic Mats', 'with realistic materials and smooth shading'),
-                ('+ Low Poly', 'stylized low poly aesthetic'),
-                ('+ Bevel', 'with bevel modifiers on sharp edges'),
-            ]
-            for label, val in tags:
-                op = tags_row.operator('blendrelay.append_prompt_tag', text=label)
-                op.tag = val
+
 
             layout.separator(factor=0.3)
 
