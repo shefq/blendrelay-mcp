@@ -1457,6 +1457,7 @@ class BR_OT_ResetHUDTransform(bpy.types.Operator):
 
     def execute(self, context):
         context.scene.blendrelay_hud_width = 780
+        context.scene.blendrelay_hud_adaptive = True
         context.scene.blendrelay_hud_scale = 1.0
         context.scene.blendrelay_hud_x_offset = 0.0
         context.scene.blendrelay_hud_y_offset = 0.0
@@ -1748,8 +1749,11 @@ class BR_PT_Main(bpy.types.Panel):
             col_hud.use_property_split = True
             col_hud.use_property_decorate = False
             col_hud.prop(scene, 'blendrelay_show_viewport_hud', text='Show HUD')
-            col_hud.prop(scene, 'blendrelay_hud_width', text='Width (px)', slider=True)
-            col_hud.prop(scene, 'blendrelay_hud_scale', text='Scale', slider=True)
+            col_hud.prop(scene, 'blendrelay_hud_adaptive', text='Adaptive Size')
+            width_row = col_hud.row()
+            width_row.enabled = not scene.blendrelay_hud_adaptive
+            width_row.prop(scene, 'blendrelay_hud_width', text='Manual Width (px)')
+            col_hud.prop(scene, 'blendrelay_hud_scale', text='Scale Adjustment', slider=True)
             hud_box.operator('blendrelay.reset_hud_transform', text='Reset HUD Layout', icon='LOOP_BACK')
 
             layout.separator(factor=0.5)
@@ -1941,17 +1945,22 @@ def register():
     )
     bpy.types.Scene.blendrelay_hud_width = IntProperty(
         name='HUD Width',
-        description='Width of the floating AI command bar in pixels',
+        description='Width of the floating AI command bar when Adaptive Size is disabled',
         default=780,
         min=500,
-        max=1500,
+        max=4000,
+    )
+    bpy.types.Scene.blendrelay_hud_adaptive = BoolProperty(
+        name='Adaptive HUD Size',
+        description='Automatically size the HUD from the available 3D Viewport area',
+        default=True,
     )
     bpy.types.Scene.blendrelay_hud_scale = FloatProperty(
         name='HUD Scale',
-        description='Overall size multiplier for the floating AI command bar',
+        description='Fine-tune the adaptive or manual HUD size multiplier',
         default=1.0,
         min=0.6,
-        max=1.6,
+        max=2.5,
         step=5,
         precision=2,
     )
@@ -2001,6 +2010,7 @@ def unregister():
         'blendrelay_unattended_agent_permissions',
         'blendrelay_show_viewport_hud',
         'blendrelay_hud_width',
+        'blendrelay_hud_adaptive',
         'blendrelay_hud_scale',
         'blendrelay_hud_x_offset',
         'blendrelay_hud_y_offset',

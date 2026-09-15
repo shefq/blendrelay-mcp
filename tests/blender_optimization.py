@@ -16,6 +16,13 @@ assert bpy.context.scene.blendrelay_permission_mode == 'AUTONOMOUS'
 assert bpy.context.scene.blendrelay_allow_python_execution is True
 assert bpy.context.scene.blendrelay_allow_antigravity_mcp is True
 assert bpy.context.scene.blendrelay_unattended_agent_permissions is True
+assert bpy.context.scene.blendrelay_hud_adaptive is True
+wide_metrics = ui.viewport_hud._hud_layout_metrics(1600, 900, 780, 1.0, adaptive=True)
+assert round(wide_metrics['width']) == 880 and round(wide_metrics['height']) == round(126 * (880 / 780))
+metrics = ui.viewport_hud._hud_layout_metrics(600, 300, 780, 1.0, adaptive=True)
+assert round(metrics['width']) == 390 and round(metrics['height']) == 63 and metrics['auto_scaled']
+manual = ui.viewport_hud._hud_layout_metrics(1600, 900, 780, wide_metrics['scale'], adaptive=False)
+assert manual['scale'] == wide_metrics['scale'] and round(manual['width']) == round(wide_metrics['width'])
 batch = general.build_batch([
     {'type': 'collection', 'name': 'Batch Scene'},
     {'type': 'material', 'name': 'Batch Material', 'color': [.4, .3, .2, 1], 'roughness': .8},

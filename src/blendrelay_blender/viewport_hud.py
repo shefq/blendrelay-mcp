@@ -102,6 +102,58 @@ HUD_STATE = {
 }
 
 
+HUD_BASE_HEIGHT = 126.0
+HUD_DESIGN_WIDTH = 780.0
+HUD_VIEWPORT_MARGIN = 24.0
+HUD_AUTO_WIDTH_FRACTION = 0.55
+HUD_AUTO_SCALE_MIN = 0.50
+HUD_AUTO_SCALE_MAX = 1.45
+
+
+def _hud_layout_metrics(viewport_width, viewport_height, manual_width, user_scale, adaptive=True):
+    """Return a HUD size that remains usable in the available viewport.
+
+    Automatic mode uses a balanced proportion of the active 3D viewport and
+    derives the visual scale from it. Its scale range avoids tiny controls on
+    high-DPI displays and an oversized HUD on ultrawide screens. Manual mode
+    preserves the user's chosen width. Both modes always fit within the
+    available width and height.
+    """
+    rw = max(1.0, float(viewport_width))
+    rh = max(1.0, float(viewport_height))
+    # Adaptive mode treats this as a fine-tuning multiplier. Manual mode can
+    # retain the larger effective scale produced by a high-resolution viewport.
+    scale_limit = 1.6 if adaptive else 2.5
+    user_scale = max(0.65, min(scale_limit, float(user_scale)))
+    available_w = max(1.0, rw - HUD_VIEWPORT_MARGIN)
+    available_h = max(1.0, rh - HUD_VIEWPORT_MARGIN)
+
+    if adaptive:
+        # Use the same design width at every resolution. Scaling both axes
+        # from the viewport width keeps text and controls comfortably sized on
+        # high-DPI displays while retaining the exact visual proportions.
+        base_width = HUD_DESIGN_WIDTH
+        target_width = min(available_w, rw * HUD_AUTO_WIDTH_FRACTION)
+        viewport_scale = max(
+            HUD_AUTO_SCALE_MIN,
+            min(HUD_AUTO_SCALE_MAX, target_width / base_width),
+        )
+        requested_scale = viewport_scale * user_scale
+    else:
+        base_width = max(500.0, min(4000.0, float(manual_width)))
+        requested_scale = user_scale
+
+    fit = min(1.0, available_w / (base_width * requested_scale), available_h / (HUD_BASE_HEIGHT * requested_scale))
+    effective_scale = requested_scale * fit
+    return {
+        'base_width': base_width,
+        'scale': effective_scale,
+        'width': base_width * effective_scale,
+        'height': HUD_BASE_HEIGHT * effective_scale,
+        'auto_scaled': adaptive or fit < 0.999,
+    }
+
+
 # ── Geometry & Shader Utilities ──────────────────────────────────────────────
 
 def _make_rounded_fan(x, y, w, h, r, segs=6):
@@ -271,14 +323,19 @@ def draw_viewport_hud():
     rh = region.height
 
     # ── Scale & Sizing Transform ─────────────────────────────────────────────
-    scale = getattr(scene, 'blendrelay_hud_scale', 1.0)
-    scale = max(0.65, min(1.6, float(scale)))
-
-    base_w = getattr(scene, 'blendrelay_hud_width', 780)
-    base_w = max(500.0, min(1500.0, float(base_w)))
-
-    hud_w = min(base_w * scale, rw - 24.0)
-    hud_h = 126.0 * scale
+    # Auto sizing follows the actual 3D Viewport, not the whole Blender window.
+    # It therefore responds correctly when a sidebar, timeline, or editor is
+    # resized.  Manual width remains available for users who turn it off.
+    metrics = _hud_layout_metrics(
+        rw,
+        rh,
+        getattr(scene, 'blendrelay_hud_width', 780),
+        getattr(scene, 'blendrelay_hud_scale', 1.0),
+        getattr(scene, 'blendrelay_hud_adaptive', True),
+    )
+    scale = metrics['scale']
+    hud_w = metrics['width']
+    hud_h = metrics['height']
 
     x_off = getattr(scene, 'blendrelay_hud_x_offset', 0.0)
     y_off = getattr(scene, 'blendrelay_hud_y_offset', 0.0)
@@ -820,19 +877,26 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 return {'RUNNING_MODAL'}
 
             if event.type in ('MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'):
-                scale = getattr(scene, 'blendrelay_hud_scale', 1.0)
+                metrics = _hud_layout_metrics(
+                    target_region.width,
+                    target_region.height,
+                    getattr(scene, 'blendrelay_hud_width', 780),
+                    getattr(scene, 'blendrelay_hud_scale', 1.0),
+                    getattr(scene, 'blendrelay_hud_adaptive', True),
+                )
+                scale = metrics['scale']
                 start_mx, start_my = HUD_STATE['drag_start_mouse']
 
                 if dragging in ('resize_right', 'resize_corner'):
                     dx = (mx - start_mx) / scale
-                    new_w = max(500, min(1400, int(HUD_STATE['drag_start_width'] + dx * 2.0)))
+                    new_w = max(500, min(4000, int(HUD_STATE['drag_start_width'] + dx * 2.0)))
                     scene.blendrelay_hud_width = new_w
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
                 elif dragging == 'resize_left':
                     dx = (start_mx - mx) / scale
-                    new_w = max(500, min(1400, int(HUD_STATE['drag_start_width'] + dx * 2.0)))
+                    new_w = max(500, min(4000, int(HUD_STATE['drag_start_width'] + dx * 2.0)))
                     scene.blendrelay_hud_width = new_w
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
@@ -850,7 +914,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
         if event.ctrl and is_inside(total_bounds):
             if event.type == 'WHEELUPMOUSE':
                 cur = getattr(scene, 'blendrelay_hud_scale', 1.0)
-                scene.blendrelay_hud_scale = min(1.6, round(cur + 0.05, 2))
+                scene.blendrelay_hud_scale = min(2.5, round(cur + 0.05, 2))
                 target_area.tag_redraw()
                 return {'RUNNING_MODAL'}
             elif event.type == 'WHEELDOWNMOUSE':
@@ -967,6 +1031,26 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 # 1. Resize handles initiation
                 for rkey in ('resize_corner', 'resize_right', 'resize_left'):
                     if is_inside(bounds.get(rkey)):
+                        # A direct resize is an explicit request for manual
+                        # width. Preserve the currently visible auto width so
+                        # the HUD does not jump when the drag begins.
+                        metrics = _hud_layout_metrics(
+                            target_region.width,
+                            target_region.height,
+                            getattr(scene, 'blendrelay_hud_width', 780),
+                            getattr(scene, 'blendrelay_hud_scale', 1.0),
+                            getattr(scene, 'blendrelay_hud_adaptive', True),
+                        )
+                        if getattr(scene, 'blendrelay_hud_adaptive', True):
+                            scene.blendrelay_hud_adaptive = False
+                            # Store both the effective scale and the matching
+                            # design width.  This keeps text, controls, and
+                            # physical width identical when manual resizing
+                            # begins instead of resetting the HUD to 100%.
+                            scene.blendrelay_hud_scale = round(metrics['scale'], 2)
+                            scene.blendrelay_hud_width = round(
+                                metrics['width'] / scene.blendrelay_hud_scale
+                            )
                         HUD_STATE['dragging'] = rkey
                         HUD_STATE['drag_start_mouse'] = (mx, my)
                         HUD_STATE['drag_start_width'] = float(scene.blendrelay_hud_width)
@@ -977,7 +1061,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 # 2. Scale Zoom Buttons (+/- and reset)
                 if is_inside(bounds.get('scale_up')):
                     cur = getattr(scene, 'blendrelay_hud_scale', 1.0)
-                    scene.blendrelay_hud_scale = min(1.6, round(cur + 0.1, 2))
+                    scene.blendrelay_hud_scale = min(2.5, round(cur + 0.1, 2))
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
@@ -990,6 +1074,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 if is_inside(bounds.get('scale_reset')):
                     scene.blendrelay_hud_scale = 1.0
                     scene.blendrelay_hud_width = 780
+                    scene.blendrelay_hud_adaptive = True
                     scene.blendrelay_hud_x_offset = 0.0
                     scene.blendrelay_hud_y_offset = 0.0
                     target_area.tag_redraw()
