@@ -3,13 +3,17 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
-import bpy
+try:
+    import bpy
+    from blendrelay_blender import general
+    import blendrelay_blender
+except ImportError:
+    bpy = None
 
-from blendrelay_blender import general
 from blendrelay_runtime.service import Service
-import blendrelay_blender
 
 
+@unittest.skipIf(bpy is None, "Blender Python API (bpy) is not available")
 class ClearDataTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.root = Path(self.tmp.name)

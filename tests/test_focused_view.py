@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import tempfile
 import unittest
-import bpy
-from blendrelay_blender import focused_view, general
+try:
+    import bpy
+    from blendrelay_blender import focused_view, general
+except ImportError:
+    bpy = None
 
 
+@unittest.skipIf(bpy is None, "Blender Python API (bpy) is not available")
 class FocusedViewTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

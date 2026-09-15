@@ -12,6 +12,9 @@ MIN_BLENDER_VERSION = (4, 5)
 
 def blender_config_root() -> Path:
     """Return the platform's standard parent directory for Blender versions."""
+    override = os.environ.get("BLENDRELAY_BLENDER_CONFIG_ROOT")
+    if override:
+        return Path(override)
     if os.name == "nt":
         appdata = os.environ.get("APPDATA")
         if not appdata:
