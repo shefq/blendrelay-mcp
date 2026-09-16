@@ -43,6 +43,10 @@ class AgentPermissionTests(unittest.TestCase):
         self.assertIn('without completing', agent_failure(0, expected_edit=True, successful_edits=0))
         self.assertIsNone(agent_failure(0, expected_edit=True, successful_edits=1))
 
+    def test_claude_error_result_is_failure_even_with_zero_exit(self):
+        log='{"type":"result","subtype":"error_during_execution","session_id":"x"}'
+        self.assertIn('Claude Code', agent_failure(0, log_text=log))
+
     def test_blender_job_error_overrides_zero_exit(self):
         failure=agent_failure(0,blender_errors=[{'action':'execute','error':'Traceback\nTypeError: bad argument'}])
         self.assertIn('TypeError: bad argument',failure)

@@ -113,6 +113,28 @@ def default_codex_path():
     return r'C:\Users\mshef\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe'
 
 
+def default_claude_path():
+    for name in ('claude.exe', 'claude.cmd', 'claude'):
+        found = shutil.which(name)
+        if found:
+            return found
+    candidates = [
+        Path.home() / '.local' / 'bin' / 'claude.exe',
+        Path(os.environ.get('APPDATA', '')) / 'npm' / 'claude.cmd',
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return 'claude'
+
+
+AGENT_NAMES = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude'}
+
+
+def agent_display_name(agent):
+    return AGENT_NAMES.get(agent, str(agent).title())
+
+
 # ── Optional model overrides ───────────────────────────────────────────────
 
 
@@ -123,6 +145,8 @@ _MODEL_ITEMS = {
                     (MODEL_CUSTOM, 'Custom…', 'Enter a model identifier', 'OPTIONS', 1)],
     'CODEX': [(MODEL_DEFAULT, 'CLI default', 'Use the model configured by Codex', 'AUTO', 0),
               (MODEL_CUSTOM, 'Custom…', 'Enter a model identifier', 'OPTIONS', 1)],
+    'CLAUDE': [(MODEL_DEFAULT, 'CLI default', 'Use the model configured by Claude Code', 'AUTO', 0),
+               (MODEL_CUSTOM, 'Custom…', 'Enter a Claude model alias or identifier', 'OPTIONS', 1)],
 }
 
 
@@ -191,13 +215,14 @@ def model_items_codex(self, context):
     return _MODEL_ITEMS['CODEX']
 
 
+def model_items_claude(self, context):
+    return _MODEL_ITEMS['CLAUDE']
+
+
 def selected_model(scene, agent):
-    if agent == 'ANTIGRAVITY':
-        choice = getattr(scene, 'blendrelay_antigravity_model', MODEL_DEFAULT)
-        custom = getattr(scene, 'blendrelay_antigravity_model_custom', '').strip()
-    else:
-        choice = getattr(scene, 'blendrelay_codex_model', MODEL_DEFAULT)
-        custom = getattr(scene, 'blendrelay_codex_model_custom', '').strip()
+    prefix = {'ANTIGRAVITY': 'antigravity', 'CODEX': 'codex', 'CLAUDE': 'claude'}.get(agent, 'codex')
+    choice = getattr(scene, f'blendrelay_{prefix}_model', MODEL_DEFAULT)
+    custom = getattr(scene, f'blendrelay_{prefix}_model_custom', '').strip()
     if choice == MODEL_DEFAULT:
         return ''
     if choice == MODEL_CUSTOM:
@@ -209,7 +234,10 @@ def refresh_models_async():
     def worker():
         codex_count = discover_codex_models()
         antigravity_count = discover_antigravity_models()
-        STATE['model_status'] = f'{codex_count} Codex and {antigravity_count} Antigravity models found'
+        STATE['model_status'] = (
+            f'{codex_count} Codex and {antigravity_count} Antigravity models found; '
+            'Claude uses its CLI default or a custom identifier'
+        )
         STATE['need_redraw'] = True
     threading.Thread(target=worker, daemon=True).start()
 
@@ -480,13 +508,47 @@ def log_agent_stream(line, agent_name, log_file, collected_text):
         except Exception:
             pass
 
+    if agent_name == 'Claude' and line_clean.startswith('{'):
+        try:
+            data = json.loads(line_clean)
+            msg_type = data.get('type')
+            if msg_type == 'system' and data.get('subtype') == 'init':
+                print(f"[Claude] Session initialized · Model: {data.get('model', '')}", flush=True)
+                return
+            if msg_type == 'stream_event':
+                event = data.get('event', {})
+                if event.get('type') == 'content_block_start':
+                    block = event.get('content_block', {})
+                    if block.get('type') == 'tool_use':
+                        print(f"\n[Claude] Tool Call: {block.get('name', 'tool')}", flush=True)
+                elif event.get('type') == 'content_block_delta':
+                    delta = event.get('delta', {})
+                    if delta.get('type') == 'text_delta':
+                        chunk = delta.get('text', '')
+                        if chunk:
+                            sys.stdout.write(chunk)
+                            sys.stdout.flush()
+                            collected_text.append(chunk)
+                return
+            if msg_type == 'result':
+                subtype = data.get('subtype', 'unknown')
+                cost = data.get('total_cost_usd')
+                cost_text = f' · ${cost:.4f}' if isinstance(cost, (int, float)) else ''
+                print(f"\n[Claude] Finished ({subtype}{cost_text})", flush=True)
+                if not collected_text and data.get('result'):
+                    collected_text.append(str(data['result']))
+                return
+            return
+        except (ValueError, TypeError):
+            pass
+
     # Skip noisy glog preamble lines from the CLI runner
     if line_clean.startswith('ERROR: logging before') or line_clean.startswith('Fetching available'):
         return
 
     # Standard / Codex console line
     print(f"[{agent_name}] {line_clean}", flush=True)
-    if agent_name != 'Antigravity':
+    if agent_name not in ('Antigravity', 'Claude'):
         collected_text.append(line)
 
 
@@ -533,11 +595,11 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
     disable_windows_quickedit()
     active_proc = STATE.get('agent_process') or STATE.get('codex_process')
     if active_proc and active_proc.poll() is None:
-        agent_name = 'Antigravity' if STATE.get('agent_backend') == 'ANTIGRAVITY' else 'Codex'
+        agent_name = agent_display_name(STATE.get('agent_backend', 'ANTIGRAVITY'))
         raise RuntimeError(f'An {agent_name} prompt is already running. Click Cancel Running Task or wait for it to finish.')
     prompt = (prompt_override or context.scene.blendrelay_codex_prompt).strip()
     agent = getattr(context.scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
-    agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
+    agent_name = agent_display_name(agent)
     if not prompt:
         raise RuntimeError(f'Enter a prompt for {agent_name}')
     autonomous = getattr(context.scene, 'blendrelay_permission_mode', 'AUTONOMOUS') == 'AUTONOMOUS'
@@ -578,11 +640,21 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
                 'in MCP Call Controls; it grants only mcp(blendrelay/*).'
             )
         model = selected_model(context.scene, agent)
-    else:
+    elif agent == 'CODEX':
         exe_str = getattr(context.scene, 'blendrelay_codex_path', '').strip() or default_codex_path()
         executable = Path(exe_str)
         if not executable.is_file() and not shutil.which(str(executable)):
             raise RuntimeError(f'Codex executable not found at: {executable}. Set its path in the BlendRelay panel.')
+        model = selected_model(context.scene, agent)
+    else:
+        exe_str = getattr(context.scene, 'blendrelay_claude_path', '').strip() or default_claude_path()
+        resolved = shutil.which(exe_str)
+        executable = Path(resolved or exe_str)
+        if not executable.is_file():
+            raise RuntimeError(
+                f'Claude Code CLI not found at: {exe_str}. Install Claude Code, sign in, '
+                'then set its executable path in BlendRelay Settings.'
+            )
         model = selected_model(context.scene, agent)
 
     root = Path(STATE['root'] or context.scene.blendrelay_runtime_dir).resolve()
@@ -639,6 +711,18 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
         except Exception as error:
             STATE['status'] = f'Edit selection capture unavailable: {error}'
     reference_image_paths = reference_images(context.scene)
+    if agent == 'CLAUDE' and reference_image_paths:
+        staged_references = []
+        for index, source_path in enumerate(reference_image_paths, start=1):
+            source = Path(source_path)
+            staged = scene_root / 'agent_runs' / f'{run_id}-reference-{index}{source.suffix.lower()}'
+            try:
+                shutil.copy2(source, staged)
+                staged_references.append(str(staged))
+            except OSError as error:
+                print(f'[BlendRelay] Could not stage Claude reference image {source.name}: {error}', flush=True)
+        if staged_references:
+            reference_image_paths = staged_references
     ref_image_path = Path(reference_image_paths[0]) if reference_image_paths else None
     has_ref_image = bool(ref_image_path)
 
@@ -777,7 +861,7 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
             use_stdin = True  # pipe full_instructions via stdin
         else:
             args = [str(executable), str(prompt_file)]
-    else:
+    elif agent == 'CODEX':
         # Codex: write to file and pass file path (avoids arg length limits)
         reference_vision_paths = ([str(vision_image_path)] if has_ref_image and vision_image_path else []) + reference_image_paths[1:]
         image_paths = reference_vision_paths + selection_view_paths
@@ -791,6 +875,15 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
             '--output-last-message', str(final_path),
             '-',  # Read prompt from stdin, including potentially large mesh selections.
         ]
+    else:
+        claude_mcp_config = agent_permissions.write_claude_mcp_config(
+            scene_root / 'agent_runs' / f'{run_id}.claude-mcp.json'
+        )
+        args = agent_permissions.claude_command(
+            executable, claude_mcp_config, resume_id=resume_id or '', model=model,
+            add_dirs=(scene_root,),
+        )
+        use_stdin = True
 
     if agent == 'CODEX':
         use_stdin = True
@@ -896,7 +989,7 @@ def check_agent():
     output_path = STATE.get('agent_output') or STATE.get('codex_output')
     output = Path(output_path) if output_path else None
     message = output.read_text(encoding='utf-8', errors='replace').strip() if output and output.exists() else ''
-    agent_name = 'Antigravity' if STATE.get('agent_backend') == 'ANTIGRAVITY' else 'Codex'
+    agent_name = agent_display_name(STATE.get('agent_backend', 'ANTIGRAVITY'))
     log_path = STATE.get('agent_log') or STATE.get('codex_log')
     log_text = Path(log_path).read_text(encoding='utf-8', errors='replace') if log_path and Path(log_path).exists() else ''
     failure = agent_permissions.agent_failure(
@@ -1102,7 +1195,7 @@ class BR_OT_VerifyAndFix(bpy.types.Operator):
 class BR_OT_SendToAgent(bpy.types.Operator):
     bl_idname = 'blendrelay.send_to_agent'
     bl_label = 'Send to AI Agent'
-    bl_description = 'Run a local Antigravity or Codex task with the prompt and selected-object context'
+    bl_description = 'Run the selected local AI agent with the prompt and Blender context'
     def execute(self, context):
         try:
             start_agent(context)
@@ -1128,7 +1221,7 @@ class BR_OT_SendToCodex(bpy.types.Operator):
 class BR_OT_CancelAgent(bpy.types.Operator):
     bl_idname = 'blendrelay.cancel_agent'
     bl_label = 'Cancel AI Agent Task'
-    bl_description = 'Terminate currently running Antigravity or Codex task'
+    bl_description = 'Terminate the currently running AI agent task'
     def execute(self, context):
         proc = STATE.get('agent_process') or STATE.get('codex_process')
         if proc:
@@ -1518,7 +1611,7 @@ class BR_PT_Main(bpy.types.Panel):
         # ── TAB: GENERATE ───────────────────────────────────────────────────
         if tab == 'GENERATE':
             agent = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
-            agent_name = 'Antigravity' if agent == 'ANTIGRAVITY' else 'Codex'
+            agent_name = agent_display_name(agent)
 
             # Active Task Running Banner
             active_proc = STATE.get('agent_process') or STATE.get('codex_process')
@@ -1543,8 +1636,9 @@ class BR_PT_Main(bpy.types.Panel):
             e_row = engine_card.row(align=True)
             e_row.prop(scene, 'blendrelay_agent_backend', expand=True)
             e_row.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
-            model_prop = 'blendrelay_antigravity_model' if agent == 'ANTIGRAVITY' else 'blendrelay_codex_model'
-            custom_prop = 'blendrelay_antigravity_model_custom' if agent == 'ANTIGRAVITY' else 'blendrelay_codex_model_custom'
+            model_prefix = {'ANTIGRAVITY': 'antigravity', 'CODEX': 'codex', 'CLAUDE': 'claude'}[agent]
+            model_prop = f'blendrelay_{model_prefix}_model'
+            custom_prop = f'blendrelay_{model_prefix}_model_custom'
             engine_card.prop(scene, model_prop, text='Model')
             if getattr(scene, model_prop, MODEL_DEFAULT) == MODEL_CUSTOM:
                 engine_card.prop(scene, custom_prop, text='Custom model')
@@ -1689,11 +1783,16 @@ class BR_PT_Main(bpy.types.Panel):
                 if scene.blendrelay_antigravity_model == MODEL_CUSTOM:
                     col.prop(scene, 'blendrelay_antigravity_model_custom', text='Custom model')
                 col.prop(scene, 'blendrelay_antigravity_path', text='CLI Path')
-            else:
+            elif agent == 'CODEX':
                 col.prop(scene, 'blendrelay_codex_model', text='Model')
                 if scene.blendrelay_codex_model == MODEL_CUSTOM:
                     col.prop(scene, 'blendrelay_codex_model_custom', text='Custom model')
                 col.prop(scene, 'blendrelay_codex_path', text='CLI Path')
+            else:
+                col.prop(scene, 'blendrelay_claude_model', text='Model')
+                if scene.blendrelay_claude_model == MODEL_CUSTOM:
+                    col.prop(scene, 'blendrelay_claude_model_custom', text='Custom model')
+                col.prop(scene, 'blendrelay_claude_path', text='CLI Path')
             model_status = STATE.get('model_status')
             if model_status:
                 col.label(text=model_status[:48], icon='INFO')
@@ -1851,6 +1950,7 @@ def register():
         items=[
             ('ANTIGRAVITY', 'Antigravity', 'Run Google Antigravity to edit the Blender scene'),
             ('CODEX', 'Codex', 'Run OpenAI Codex CLI to edit the Blender scene'),
+            ('CLAUDE', 'Claude', 'Run Anthropic Claude Code to edit the Blender scene'),
         ],
         default='ANTIGRAVITY',
     )
@@ -1885,6 +1985,21 @@ def register():
         name='Codex executable',
         subtype='FILE_PATH',
         default=default_codex_path(),
+    )
+    bpy.types.Scene.blendrelay_claude_model = EnumProperty(
+        name='Claude model',
+        description='Use the Claude Code default or enter a model alias such as sonnet or opus',
+        items=model_items_claude,
+    )
+    bpy.types.Scene.blendrelay_claude_model_custom = StringProperty(
+        name='Custom model',
+        default='',
+        description='Claude model alias or full identifier passed with --model',
+    )
+    bpy.types.Scene.blendrelay_claude_path = StringProperty(
+        name='Claude executable',
+        subtype='FILE_PATH',
+        default=default_claude_path(),
     )
     bpy.types.Scene.blendrelay_reference_image = StringProperty(
         name='Reference Image',
@@ -1982,6 +2097,9 @@ def unregister():
         'blendrelay_codex_model',
         'blendrelay_codex_model_custom',
         'blendrelay_codex_path',
+        'blendrelay_claude_model',
+        'blendrelay_claude_model_custom',
+        'blendrelay_claude_path',
         'blendrelay_reference_image',
         'blendrelay_reference_images',
     ]

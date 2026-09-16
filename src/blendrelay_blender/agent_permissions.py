@@ -21,13 +21,47 @@ def antigravity_mcp_config_path():
     return Path.home() / '.gemini' / 'config' / 'mcp_config.json'
 
 
-def _default_blendrelay_server():
+def default_blendrelay_server():
     executable = shutil.which('blendrelay-mcp')
     if executable:
         return {'command': executable, 'args': ['mcp']}
+    uvx = shutil.which('uvx')
+    if uvx:
+        return {'command': uvx, 'args': ['blendrelay-mcp', 'mcp']}
     # This fallback is mainly useful in development installs where the package is
     # available to the interpreter that loaded the add-on.
     return {'command': sys.executable, 'args': ['-m', 'blendrelay_mcp.cli', 'mcp']}
+
+
+def write_claude_mcp_config(path):
+    """Write an isolated Claude Code MCP config for one BlendRelay run."""
+    path = Path(path)
+    config = {'mcpServers': {'blendrelay': default_blendrelay_server()}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+    return path
+
+
+def claude_mcp_permission_args():
+    """Approve only BlendRelay's MCP tools in unattended Claude Code runs."""
+    return ['--allowedTools', 'mcp__blendrelay__*']
+
+
+def claude_command(executable, mcp_config, resume_id='', model='', add_dirs=()):
+    """Build the documented non-interactive Claude Code invocation."""
+    return [
+        str(executable),
+        '--print',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--include-partial-messages',
+        '--mcp-config', str(mcp_config),
+        '--strict-mcp-config',
+        *claude_mcp_permission_args(),
+        *(part for directory in add_dirs for part in ('--add-dir', str(directory))),
+        *(['--resume', resume_id] if resume_id else []),
+        *(['--model', model] if model else []),
+    ]
 
 
 def ensure_antigravity_mcp_server(path=None):
@@ -47,7 +81,7 @@ def ensure_antigravity_mcp_server(path=None):
         raise RuntimeError('Antigravity mcpServers setting must be a JSON object')
     if isinstance(servers.get('blendrelay'), dict):
         return False, path
-    servers['blendrelay'] = _default_blendrelay_server()
+    servers['blendrelay'] = default_blendrelay_server()
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
@@ -123,6 +157,10 @@ def agent_failure(exit_code, message='', log_text='', blender_errors=(), expecte
         'so it was auto-denied',
     )):
         return 'Antigravity denied the BlendRelay MCP permission in headless mode.'
+    if ('"type":"result"' in combined or '"type": "result"' in combined) and any(
+        marker in combined for marker in ('"subtype":"error_', '"subtype": "error_')
+    ):
+        return 'Claude Code reported an unsuccessful result; see the run log for details.'
     if exit_code:
         return f'Agent exited with code {exit_code}.'
     if expected_edit and not successful_edits:

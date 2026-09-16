@@ -101,7 +101,7 @@ def instructions(mode, instance, edit_mode, visual, only_selected, max_mcp_calls
     permission = ("The user selected Autonomous generation and authorized Blender editing and asset operations for this scene."
                   if autonomous else "Respect the active scene permission switches.")
     return f"""Operate on the current Blender file through BlendRelay. instance_id={instance}.
-Use only the Antigravity MCP server named `blendrelay` for Blender operations. Do not use a different Blender server. If `blendrelay` is unavailable, report that registration problem immediately instead of inspecting local MCP wrapper files or trying another server.
+Use only the MCP server named `blendrelay` for Blender operations. Do not use a different Blender server. If `blendrelay` is unavailable, report that registration problem immediately instead of inspecting local MCP wrapper files or trying another server.
 Task category={mode}; workload={resource_mode}; output_quality={quality}.
 Current scene state and the current user request supersede old conversation assumptions.
 

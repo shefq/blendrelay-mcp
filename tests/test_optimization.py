@@ -2,7 +2,7 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
-from blendrelay_blender import conversation
+from blendrelay_blender import conversation, agent_permissions
 from blendrelay_mcp.job_results import wait_and_compact
 from blendrelay_mcp.server import handle
 from blendrelay_blender.workflow import compact, choose, instructions, RESOURCE_MODE_ITEMS, resource_limits, profile
@@ -24,9 +24,29 @@ class OptimizationTests(unittest.TestCase):
             path=Path(directory)/'conversations.json'
             conversation.save(path,'CODEX','codex-thread')
             conversation.save(path,'ANTIGRAVITY','agy-thread')
+            conversation.save(path,'CLAUDE','claude-session')
             conversation.save(path,'CODEX',None)
-            self.assertEqual(conversation.load(path),{'CODEX':None,'ANTIGRAVITY':'agy-thread'})
+            self.assertEqual(conversation.load(path),{
+                'CODEX':None,'ANTIGRAVITY':'agy-thread','CLAUDE':'claude-session'
+            })
         self.assertEqual(conversation.event_id('{"type":"thread.started","thread_id":"abc"}'),'abc')
+        self.assertEqual(conversation.event_id('{"type":"result","session_id":"claude-abc"}'),'claude-abc')
+
+    def test_claude_mcp_config_and_narrow_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = agent_permissions.write_claude_mcp_config(Path(directory) / 'mcp.json')
+            config = json.loads(path.read_text(encoding='utf-8'))
+            server = config['mcpServers']['blendrelay']
+            self.assertTrue(server['command'])
+            self.assertTrue(server['args'])
+            self.assertEqual(agent_permissions.claude_mcp_permission_args(),
+                             ['--allowedTools', 'mcp__blendrelay__*'])
+            command = agent_permissions.claude_command('claude', path, 'session-1', 'sonnet', ['/scene'])
+            self.assertEqual(command[0], 'claude')
+            self.assertIn('--strict-mcp-config', command)
+            self.assertEqual(command[command.index('--resume') + 1], 'session-1')
+            self.assertEqual(command[command.index('--model') + 1], 'sonnet')
+            self.assertEqual(command[command.index('--add-dir') + 1], '/scene')
 
     def test_wait_and_duplicate(self):
         c=FakeClient()
@@ -106,6 +126,12 @@ class OptimizationTests(unittest.TestCase):
         m.feed(json.dumps({'event':'result','result':{'usage':{'input_tokens':10,'output_tokens':2,'cache_read_tokens':100}}}))
         self.assertEqual(m.summary()['tool_calls_by_stage'],{'inspection':1})
         self.assertEqual(m.summary()['provider_usage']['input_tokens'],10)
+        claude=Metrics()
+        claude.feed(json.dumps({'type':'stream_event','event':{'type':'content_block_start',
+            'content_block':{'type':'tool_use','id':'tool-1','name':'mcp__blendrelay__inspect_scene','input':{}}}}))
+        claude.feed(json.dumps({'type':'result','usage':{'input_tokens':7,'output_tokens':3}}))
+        self.assertEqual(claude.summary()['provider_usage']['output_tokens'],3)
+        self.assertEqual(sum(claude.summary()['tool_calls_by_stage'].values()),1)
 
 
 if __name__=='__main__':unittest.main()

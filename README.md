@@ -1,8 +1,8 @@
 # BlendRelay MCP — Create and Edit Blender Scenes with AI
 
-**A Blender AI add-on and Blender MCP server for creating and editing 3D scenes with natural-language prompts.**
+**An open-source Blender AI add-on and MCP server for prompt-based 3D modeling, scene generation, Edit Mode changes, reference images, and viewport sketches.**
 
-BlendRelay MCP brings AI 3D modeling and text-to-Blender workflows into Blender 4.5+. Connect Codex, Claude, Antigravity, or another MCP-compatible AI agent; describe what you want; attach design references; sketch over the viewport; or target selected objects and mesh elements. The agent can then inspect and update the open `.blend` scene through typed Blender tools.
+BlendRelay MCP brings AI 3D modeling and text-to-Blender workflows into Blender 4.5+. Connect Codex, Claude Code, Antigravity, or another MCP-compatible AI agent; describe what you want; attach design references; sketch over the viewport; or target selected objects and mesh elements. The agent can then inspect and update the open `.blend` scene through typed Blender tools.
 
 [Install from PyPI](https://pypi.org/project/blendrelay-mcp/) · [View the source on GitHub](https://github.com/shefq/blendrelay-mcp)
 
@@ -29,6 +29,7 @@ You need:
 - One supported AI command-line agent, installed and signed in:
   - OpenAI Codex CLI
   - Google Antigravity CLI
+  - Anthropic Claude Code
 
 
 ## Install BlendRelay
@@ -82,6 +83,12 @@ Make sure `blendrelay` appears as enabled. In Blender, choose **Codex**, select 
 
 Install and sign in to Antigravity, then select **Antigravity** in the Blender panel. BlendRelay prepares the task-specific MCP configuration when it launches the agent. If your Antigravity permission policy blocks MCP tools, allow `mcp(blendrelay/*)` in the Antigravity settings.
 
+### Claude Code
+
+Install and sign in to [Claude Code](https://code.claude.com/docs/en/setup), then select **Claude** in the Blender panel. BlendRelay detects the `claude` executable, supplies an isolated MCP configuration for each run, and approves only tools from `mcp__blendrelay__*`. You can use Claude Code's configured default model or enter an alias such as `sonnet` or `opus` under **Settings**.
+
+Conversation continuation is supported: enable **Continue** to resume the Claude session associated with the current Blender workspace, or click **New** to start cleanly.
+
 ### Other MCP clients
 
 Claude Desktop, Claude Code, Cursor, and other MCP clients can connect to Blender through the published package:
@@ -97,7 +104,7 @@ Claude Desktop, Claude Code, Cursor, and other MCP clients can connect to Blende
 }
 ```
 
-This external-client connection does not require the Blender panel to launch Codex or Antigravity. Blender and the BlendRelay add-on still need to be open and connected.
+This external-client connection does not require the Blender panel to launch Codex, Claude, or Antigravity. Blender and the BlendRelay add-on still need to be open and connected.
 
 ## Your first creation
 
@@ -197,8 +204,9 @@ uvx blendrelay-mcp doctor
 If Blender shows **Disconnected**:
 
 - Keep Blender open and click **Connect** again.
-- Confirm the correct AI CLI is installed and signed in.
+- Confirm the selected AI CLI is installed and signed in.
 - For Codex, run `codex mcp list` and confirm the server is named `blendrelay`.
+- For Claude, run `claude doctor` and confirm the CLI is healthy. BlendRelay supplies the MCP configuration automatically when Claude is launched from the panel.
 - Rerun `uvx --refresh blendrelay-mcp setup` after installing a new Blender version.
 - Restart Blender after updating the add-on.
 
@@ -219,4 +227,9 @@ Set `BLENDRELAY_DATA_DIR` if you need a different storage location.
 
 ## License
 
-The Python MCP and runtime components are released under the MIT license. The Blender extension is released under GPL-3.0-or-later. See the license files in the repository for details.
+BlendRelay MCP is open-source software. Contributions, bug reports, feature requests, and documentation improvements are welcome.
+
+- The Python MCP server and runtime are released under the MIT License.
+- The Blender extension is released under GPL-3.0-or-later.
+
+See the repository license files for the complete terms.

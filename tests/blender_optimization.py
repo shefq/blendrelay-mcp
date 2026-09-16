@@ -18,6 +18,18 @@ assert ui.viewport_hud.HUD_STATE['flash_msg'] == 'Enter a prompt for Codex'
 ui.viewport_hud.HUD_STATE['typing'] = False
 bpy.context.scene.blendrelay_codex_prompt = previous_prompt
 bpy.context.scene.blendrelay_agent_backend = previous_backend
+for prop in ('blendrelay_claude_model', 'blendrelay_claude_model_custom', 'blendrelay_claude_path'):
+    assert hasattr(bpy.context.scene, prop), prop
+bpy.context.scene.blendrelay_agent_backend = 'CLAUDE'
+assert bpy.context.scene.blendrelay_agent_backend == 'CLAUDE'
+bpy.context.scene.blendrelay_agent_backend = previous_backend
+import io
+claude_text = []
+ui.log_agent_stream(
+    '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ready"}}}\n',
+    'Claude', io.StringIO(), claude_text,
+)
+assert claude_text == ['ready']
 assert bpy.context.scene.blendrelay_task_mode == 'AUTO'
 assert bpy.context.scene.blendrelay_resource_mode == 'FULL_BUILD'
 assert bpy.context.scene.blendrelay_verification == 'AUTO'

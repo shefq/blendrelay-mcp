@@ -22,4 +22,5 @@ def event_id(line):
     try: data=json.loads(line)
     except ValueError: return None
     return (data.get('thread_id') if data.get('type')=='thread.started' else
+            data.get('session_id') or data.get('sessionId') or
             data.get('step_update',{}).get('conversation_id') or data.get('result',{}).get('conversation_id'))

@@ -29,10 +29,17 @@ class Metrics:
             key=item.get('id')
             if key not in self.seen:
                 self.seen.add(key);self.record(item.get('tool',item.get('type')),item.get('arguments',{}))
+        stream=data.get('event',{}) if data.get('type')=='stream_event' else {}
+        block=stream.get('content_block',{}) if stream.get('type')=='content_block_start' else {}
+        if block.get('type')=='tool_use':
+            key=block.get('id')
+            if key not in self.seen:
+                self.seen.add(key);self.record(block.get('name','tool'),block.get('input',{}))
         if step.get('usage'):
             self.stage_usage.setdefault(self.last_stage,[]).append(step['usage'])
         if data.get('event')=='result':self.usage=data.get('result',{}).get('usage',{})
         if data.get('type')=='turn.completed':self.usage=data.get('usage',{})
+        if data.get('type')=='result' and isinstance(data.get('usage'),dict):self.usage=data['usage']
 
     def record(self,name,params):
         raw=json.dumps(params,sort_keys=True,default=str)

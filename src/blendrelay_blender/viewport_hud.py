@@ -254,7 +254,7 @@ def _submit_agent_prompt(context):
     """Submit from the HUD without allowing operator errors to escape the modal."""
     scene = context.scene
     backend = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
-    agent_name = 'Antigravity' if backend == 'ANTIGRAVITY' else 'Codex'
+    agent_name = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude'}.get(backend, 'AI agent')
 
     if not getattr(scene, 'blendrelay_codex_prompt', '').strip():
         HUD_STATE['typing'] = True
