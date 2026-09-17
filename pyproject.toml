@@ -34,8 +34,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/shefq/blendrelay-mcp"
-Documentation = "https://github.com/shefq/blendrelay-mcp#readme"
+Homepage = "https://shefq.github.io/blendrelay-mcp/"
+Documentation = "https://shefq.github.io/blendrelay-mcp/docs/"
 Source = "https://github.com/shefq/blendrelay-mcp"
 Issues = "https://github.com/shefq/blendrelay-mcp/issues"
 Changelog = "https://github.com/shefq/blendrelay-mcp/releases"

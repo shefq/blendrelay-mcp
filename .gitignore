@@ -9,3 +9,4 @@ dist/
 *.blend1
 *.blend2
 /local_tests/
+/docs/local

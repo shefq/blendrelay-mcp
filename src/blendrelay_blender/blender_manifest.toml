@@ -1,14 +1,15 @@
 schema_version = "1.0.0"
 id = "blendrelay_mcp"
-version = "0.7.1"
+version = "0.7.2"
 name = "BlendRelay MCP"
-tagline = "Control Blender with AI agents through MCP"
-maintainer = "BlendRelay MCP contributors"
+tagline = "Create, edit, rig, and animate in Blender with AI agents"
+maintainer = "Shefq <https://github.com/shefq>"
+website = "https://github.com/shefq/blendrelay-mcp"
 type = "add-on"
-tags = ["3D View", "Add Mesh"]
+tags = ["3D View", "Animation", "Rigging", "Mesh"]
 blender_version_min = "4.5.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
 network = "Connect to the local BlendRelay runtime"
-files = "Read local runtime discovery and save editable project snapshots"
+files = "Store local workspace data and scene checkpoints"
