@@ -46,6 +46,9 @@ jobs:
       - name: Build wheel and source distribution
         run: python -m build
 
+      - name: Build Blender extension ZIP
+        run: python tools/build_extension.py
+
       - name: Validate distribution metadata
         run: python -m twine check dist/*.whl dist/*.tar.gz
 
@@ -55,14 +58,23 @@ jobs:
           release-venv/bin/python -m pip install --no-deps dist/*.whl
           release-venv/bin/blendrelay-mcp --help
 
-      - name: Store distributions
+      - name: Store Python distributions
         uses: actions/upload-artifact@v4
         with:
           name: python-package-distributions
-          path: dist/
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
           if-no-files-found: error
 
-  publish:
+      - name: Store Blender extension distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-extension-distribution
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish-pypi:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
@@ -73,7 +85,7 @@ jobs:
       id-token: write
 
     steps:
-      - name: Download distributions
+      - name: Download Python distributions
         uses: actions/download-artifact@v4
         with:
           name: python-package-distributions
@@ -81,3 +93,32 @@ jobs:
 
       - name: Publish through PyPI Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-github-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Python distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Download Blender extension
+        uses: actions/download-artifact@v4
+        with:
+          name: blender-extension-distribution
+          path: dist/
+
+      - name: Create GitHub Release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true
