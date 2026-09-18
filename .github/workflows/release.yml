@@ -122,3 +122,8 @@ jobs:
             dist/*.whl
             dist/*.tar.gz
           generate_release_notes: true
+          append_body: true
+          body: |
+            ---
+            ⭐ **If you find BlendRelay MCP helpful, please consider starring the repository on [GitHub](https://github.com/shefq/blendrelay-mcp)! It helps more creators discover the project.**
+
