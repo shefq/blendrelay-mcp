@@ -4,9 +4,9 @@
 
 BlendRelay MCP brings AI 3D modeling and text-to-Blender workflows into Blender 4.5+. Connect Codex, Claude Code, Antigravity, or another MCP-compatible AI agent; describe what you want; attach design references; sketch over the viewport; or target selected objects and mesh elements. The agent can then inspect and update the open `.blend` scene through typed Blender tools.
 
-[Visit the BlendRelay website](https://shefq.github.io/blendrelay-mcp/) · [Install from PyPI](https://pypi.org/project/blendrelay-mcp/) · [⭐ Star on GitHub](https://github.com/shefq/blendrelay-mcp)
+[Visit the BlendRelay website](https://shefq.github.io/blendrelay-mcp/) · [Watch Demo](https://www.youtube.com/watch?v=AaTDT457A3U) · [Install from PyPI](https://pypi.org/project/blendrelay-mcp/) · [⭐ Star on GitHub](https://github.com/shefq/blendrelay-mcp)
 
-![BlendRelay MCP Blender AI add-on generating and editing a detailed 3D city scene](https://raw.githubusercontent.com/shefq/blendrelay-mcp/main/docs/images/blendrelay-blender-ai-interface.webp)
+[![Blender AI Demo: Build, Rig & Animate a Dragon | BlendRelay MCP](https://img.youtube.com/vi/AaTDT457A3U/maxresdefault.jpg)](https://www.youtube.com/watch?v=AaTDT457A3U)
 
 > ⭐ **Enjoying BlendRelay MCP?** If this project helps your workflow, please consider [giving it a star on GitHub](https://github.com/shefq/blendrelay-mcp) — it helps more 3D creators and developers discover the tool!
 
