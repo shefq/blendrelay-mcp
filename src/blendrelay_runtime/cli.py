@@ -11,18 +11,7 @@ from pathlib import Path
 from .errors import BlendRelayError
 from .protocol import Client, data_dir, frame, receive
 from .service import Service
-
-
-def secure_private(path):
-    path = Path(path); os.chmod(path, 0o600)
-    if os.name != "nt": return
-    user, domain = os.environ.get("USERNAME"), os.environ.get("USERDOMAIN")
-    identity = (domain + "\\" + user) if domain and user else user
-    if not identity: return
-    result = subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", identity + ":(F)"],
-                            capture_output=True, text=True, timeout=10,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    if result.returncode: raise OSError("Could not protect runtime credentials with Windows ACLs")
+from .permissions import secure_private
 
 
 def serve(root, source_roots=()):

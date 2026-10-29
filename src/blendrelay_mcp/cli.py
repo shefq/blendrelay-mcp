@@ -63,6 +63,25 @@ def _run_doctor(data_dir_override: str | None = None, strict: bool = False) -> i
     if versions and not installed:
         errors.append("BlendRelay MCP is not installed in any compatible Blender version")
 
+    print("\nRuntime File Permissions:")
+    if target_dir.is_dir():
+        from tempfile import TemporaryDirectory
+        from blendrelay_runtime.permissions import secure_private
+        try:
+            with TemporaryDirectory(prefix=".permission-check-", dir=target_dir) as temporary:
+                probe = Path(temporary) / "probe"
+                probe.touch()
+                secure_private(probe)
+                # Also verify the runtime can write and re-protect its existing files.
+                probe.write_text("permission check", encoding="utf-8")
+                secure_private(probe)
+            print("  - PASS (private file creation, writing and permission updates)")
+        except (OSError, ValueError) as error:
+            print(f"  - FAILED: {error}")
+            errors.append(f"runtime file permission check failed: {error}")
+    else:
+        print("  - NOT CHECKED (initialize the runtime data directory first)")
+
     print("\nRuntime Status:")
     connection_file = target_dir / "connection.json"
     if connection_file.is_file():
