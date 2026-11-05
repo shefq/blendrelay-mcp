@@ -16,7 +16,7 @@ from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, F
 from .client import Connection,default_root
 from . import edit_context, workflow, run_metrics, conversation, agent_permissions
 from . import general, sketch, viewport_hud, target_region
-from . import asset_ui
+from . import asset_ui, claude_model_discovery
 
 STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
            codex_process=None,codex_output=None,codex_log=None,codex_started=0,
@@ -207,6 +207,18 @@ def discover_antigravity_models():
     return len(models)
 
 
+def discover_claude_models(executable=None):
+    try:
+        models = claude_model_discovery.discover_models(executable or default_claude_path())
+    except claude_model_discovery.ModelDiscoveryError as error:
+        STATE['claude_model_status'] = str(error)
+        # A failed refresh must not erase a previously discovered selection.
+        return max(0, len(_MODEL_ITEMS['CLAUDE']) - 2)
+    _MODEL_ITEMS['CLAUDE'] = _enum_items('Claude', models)
+    STATE['claude_model_status'] = ''
+    return len(models)
+
+
 def model_items_antigravity(self, context):
     return _MODEL_ITEMS['ANTIGRAVITY']
 
@@ -230,16 +242,34 @@ def selected_model(scene, agent):
     return choice
 
 
+_MODEL_REFRESH_LOCK = threading.Lock()
+
+
 def refresh_models_async():
+    # Capture Blender properties on the UI thread, not inside the worker.
+    scene = getattr(bpy.context, 'scene', None)
+    claude_executable = (getattr(scene, 'blendrelay_claude_path', '').strip()
+                         or default_claude_path())
+    if not _MODEL_REFRESH_LOCK.acquire(blocking=False):
+        return
+
     def worker():
-        codex_count = discover_codex_models()
-        antigravity_count = discover_antigravity_models()
-        STATE['model_status'] = (
-            f'{codex_count} Codex and {antigravity_count} Antigravity models found; '
-            'Claude uses its CLI default or a custom identifier'
-        )
-        STATE['need_redraw'] = True
-    threading.Thread(target=worker, daemon=True).start()
+        try:
+            claude_count = discover_claude_models(claude_executable)
+            codex_count = discover_codex_models()
+            antigravity_count = discover_antigravity_models()
+            status = (f'{codex_count} Codex, {antigravity_count} Antigravity and '
+                      f'{claude_count} Claude models found')
+            claude_error = STATE.get('claude_model_status')
+            STATE['model_status'] = claude_error or status
+        finally:
+            STATE['need_redraw'] = True
+            _MODEL_REFRESH_LOCK.release()
+    try:
+        threading.Thread(target=worker, daemon=True).start()
+    except Exception:
+        _MODEL_REFRESH_LOCK.release()
+        raise
 
 
 def agent_paths(root, run_id):
@@ -1988,7 +2018,7 @@ def register():
     )
     bpy.types.Scene.blendrelay_claude_model = EnumProperty(
         name='Claude model',
-        description='Use the Claude Code default or enter a model alias such as sonnet or opus',
+        description='Choose a model reported by Claude Code, use its default, or enter a custom model',
         items=model_items_claude,
     )
     bpy.types.Scene.blendrelay_claude_model_custom = StringProperty(
