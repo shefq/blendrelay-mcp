@@ -1580,6 +1580,7 @@ class BR_OT_ResetHUDTransform(bpy.types.Operator):
 
     def execute(self, context):
         context.scene.blendrelay_hud_width = 780
+        context.scene.blendrelay_hud_height = 122
         context.scene.blendrelay_hud_adaptive = True
         context.scene.blendrelay_hud_scale = 1.0
         context.scene.blendrelay_hud_x_offset = 0.0
@@ -1848,6 +1849,7 @@ class BR_PT_Main(bpy.types.Panel):
             width_row = col_hud.row()
             width_row.enabled = not scene.blendrelay_hud_adaptive
             width_row.prop(scene, 'blendrelay_hud_width', text='Manual Width (px)')
+            col_hud.prop(scene, 'blendrelay_hud_height', text='Height (px)')
             col_hud.prop(scene, 'blendrelay_hud_scale', text='Scale', slider=True)
 
             runtime_box = layout.box()
@@ -2055,6 +2057,11 @@ def register():
         min=500,
         max=4000,
     )
+    bpy.types.Scene.blendrelay_hud_height = IntProperty(
+        name='HUD Height',
+        description='Height of the floating prompt editor; drag its top or bottom edge to show more or fewer lines',
+        default=122, min=90, max=900,
+    )
     bpy.types.Scene.blendrelay_hud_adaptive = BoolProperty(
         name='Adaptive HUD Size',
         description='Automatically size the HUD from the available 3D Viewport area',
@@ -2115,6 +2122,7 @@ def unregister():
         'blendrelay_unattended_agent_permissions',
         'blendrelay_show_viewport_hud',
         'blendrelay_hud_width',
+        'blendrelay_hud_height',
         'blendrelay_hud_adaptive',
         'blendrelay_hud_scale',
         'blendrelay_hud_x_offset',

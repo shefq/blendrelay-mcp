@@ -3,7 +3,7 @@
 
 Rendered at 60 FPS in 3D Viewport 2D screen space via Blender's GPU & BLF modules.
 Designed with a unique dark obsidian interface and electric cyan accents.
-Features full interactive drag-to-resize (left/right edges & corner grip), titlebar drag-to-move,
+Features interactive width/height resizing (all edges & corner grip), titlebar drag-to-move,
 scale zoom buttons (+/-), Ctrl+Wheel zoom, and rock-solid click hit-testing.
 """
 import math
@@ -13,6 +13,7 @@ import bpy
 import blf
 import gpu
 from gpu_extras.batch import batch_for_shader
+from .prompt_editor import Editor
 
 # ── Global HUD State ─────────────────────────────────────────────────────────
 
@@ -21,9 +22,15 @@ HUD_STATE = {
     'modal_active': False,
     'hover': None,
     'typing': False,
+    'editor': Editor(),
+    'text_region': None,
+    'text_drag': None,
+    'text_pointer': False,
+    'region_bounds': {},
     'dragging': None,
     'drag_start_mouse': (0, 0),
     'drag_start_width': 780.0,
+    'drag_start_height': 122.0,
     'drag_start_scale': 1.0,
     'drag_start_offset': (0.0, 0.0),
     'cursor_time': 0.0,
@@ -42,7 +49,7 @@ HUD_AUTO_SCALE_MIN = 0.50
 HUD_AUTO_SCALE_MAX = 1.35
 
 
-def _hud_layout_metrics(viewport_width, viewport_height, manual_width, user_scale, adaptive=True):
+def _hud_layout_metrics(viewport_width, viewport_height, manual_width, user_scale, adaptive=True, manual_height=HUD_BASE_HEIGHT):
     """Return a HUD size that remains usable in the available viewport.
 
     Automatic mode uses an adaptive width (taking 80% of the active 3D viewport width)
@@ -82,7 +89,7 @@ def _hud_layout_metrics(viewport_width, viewport_height, manual_width, user_scal
         'base_width': base_width,
         'scale': effective_scale,
         'width': width,
-        'height': HUD_BASE_HEIGHT * effective_scale,
+        'height': min(available_h, max(90.0, min(900.0, float(manual_height))) * effective_scale),
         'auto_scaled': adaptive or fit < 0.999,
     }
 
@@ -228,26 +235,226 @@ def _truncate_left(text, max_w, size=13):
     return ellipsis + text
 
 
-def _wrap_prompt_text(text, max_w, size=13, max_lines=3):
-    """Wrap a prompt for the HUD while keeping the newest text visible."""
-    font_id = 0
-    blf.size(font_id, max(9, int(size)))
-    lines = []
-    for paragraph in text.splitlines() or ['']:
-        words = paragraph.split() or ['']
-        line = ''
-        for word in words:
-            candidate = word if not line else f'{line} {word}'
-            if line and blf.dimensions(font_id, candidate)[0] > max_w:
-                lines.append(line)
-                line = word
+def _prompt_measure(text, size):
+    blf.size(0, max(9, int(size)))
+    return blf.dimensions(0, text.replace('\t', '    '))[0]
+
+
+def _prompt_editor(scene):
+    editor = HUD_STATE['editor']
+    identity = scene.as_pointer() if hasattr(scene, 'as_pointer') else id(scene)
+    editor.sync(getattr(scene, 'blendrelay_codex_prompt', ''), identity)
+    return editor
+
+
+def _prompt_geometry(editor, geometry):
+    size = geometry['size']
+    measure = lambda text: _prompt_measure(text, size)
+    editor.layout(geometry['width'], measure, geometry['visible'], size)
+    return measure
+
+
+def _draw_prompt_editor(scene, bounds, x, y, width, height, scale, region):
+    editor = _prompt_editor(scene)
+    size = 13 * scale
+    line_height = max(16 * scale, max(9, int(size)) + 3 * scale)
+    geometry = dict(x=x + 12 * scale, top=y + height - 22 * scale,
+                    width=max(1, width - 48 * scale), size=size, line_height=line_height,
+                    visible=max(1, int((height - 20 * scale) / line_height)),
+                    bottom=y + 6 * scale, region=region.as_pointer())
+    bounds['prompt_editor'] = geometry
+    measure = _prompt_geometry(editor, geometry)
+    focused = HUD_STATE['typing'] and HUD_STATE.get('text_region') == region.as_pointer()
+    if not editor.text and not focused:
+        _draw_text('Describe what you want to create or change…', geometry['x'], geometry['top'],
+                   size=size, color=(.42, .48, .58, 1))
+        _draw_text('Enter for a new line · Ctrl+Enter to run', geometry['x'],
+                   geometry['top'] - line_height, size=10 * scale, color=(.30, .36, .46, 1))
+        return
+    a, b = editor.selection
+    blf.enable(0, blf.CLIPPING)
+    blf.clipping(0, geometry['x'], geometry['bottom'],
+                 geometry['x'] + geometry['width'] + 3 * scale, y + height - 6 * scale)
+    try:
+        for row in range(editor.scroll, min(len(editor.lines), editor.scroll + editor.visible)):
+            line = editor.lines[row]
+            baseline = geometry['top'] - (row - editor.scroll) * line_height
+            if focused and a != b and a <= line.end and b > line.start:
+                left = measure(editor.text[line.start:max(line.start, a)])
+                right = measure(editor.text[line.start:min(line.end, b)])
+                if b > line.end:
+                    right += 4 * scale
+                _draw_rounded_box(geometry['x'] + left, baseline - 3 * scale,
+                                  max(2 * scale, min(geometry['width'], right) - left),
+                                  line_height, 1 * scale, fill_color=(.08, .42, .68, .75))
+            _draw_text(editor.text[line.start:line.end].replace('\t', '    '), geometry['x'],
+                       baseline, size=size, color=(.95, .97, 1, 1))
+        row = editor.row()
+        if focused and editor.scroll <= row < editor.scroll + editor.visible:
+            if (time.monotonic() - HUD_STATE['cursor_time']) % 1.0 < .6:
+                left = measure(editor.text[editor.lines[row].start:editor.cursor])
+                _draw_rounded_box(geometry['x'] + left,
+                                  geometry['top'] - (row - editor.scroll) * line_height - 2 * scale,
+                                  max(1, scale), max(9, int(size)) + 3 * scale, 0,
+                                  fill_color=(.05, .9, 1, 1))
+    finally:
+        blf.disable(0, blf.CLIPPING)
+    if len(editor.lines) > editor.visible:
+        track_x, track_y = x + width - 11 * scale, y + 8 * scale
+        track_h = max(8 * scale, height - 38 * scale)
+        thumb_h = max(8 * scale, track_h * editor.visible / len(editor.lines))
+        thumb_y = track_y + (track_h - thumb_h) * (1 - editor.scroll / (len(editor.lines) - editor.visible))
+        bounds['prompt_scrollbar'] = (track_x - 4 * scale, track_y, 12 * scale, track_h)
+        geometry['scroll_track'] = (track_y, track_h, thumb_h)
+        _draw_rounded_box(track_x, track_y, 4 * scale, track_h, 2 * scale,
+                          fill_color=(.17, .22, .30, .65))
+        _draw_rounded_box(track_x, thumb_y, 4 * scale, thumb_h, 2 * scale,
+                          fill_color=(.15, .7, .82, .9))
+
+
+def _handle_prompt_event(context, event, bounds, rx, ry, region_key):
+    """Return a modal result when the editor consumes an event, else None."""
+    def inside(rect):
+        return bool(rect) and rect[0] <= rx <= rect[0] + rect[2] and rect[1] <= ry <= rect[1] + rect[3]
+
+    geometry = bounds.get('prompt_editor')
+    if not geometry:
+        return None
+    editor = _prompt_editor(context.scene)
+    measure = _prompt_geometry(editor, geometry)
+    focused = HUD_STATE['typing'] and HUD_STATE.get('text_region') == region_key
+    pressed = event.value == 'PRESS'
+    altgr = event.ctrl and getattr(event, 'alt', False) and bool(getattr(event, 'unicode', ''))
+    command = (event.ctrl or getattr(event, 'oskey', False)) and not altgr
+
+    def changed():
+        context.scene.blendrelay_codex_prompt = editor.text
+        HUD_STATE['cursor_time'] = time.monotonic()
+        return {'RUNNING_MODAL'}
+
+    def mouse_position():
+        row = editor.scroll + int(math.floor((geometry['top'] + geometry['line_height'] * .8 - ry)
+                                            / geometry['line_height']))
+        return row, editor.hit(row, rx - geometry['x'], measure)
+
+    def scrollbar_position():
+        y, height, thumb = geometry['scroll_track']
+        fraction = (y + height - thumb / 2 - ry) / max(1, height - thumb)
+        editor.scroll = round(max(0, min(1, fraction)) * max(0, len(editor.lines) - editor.visible))
+        editor.reveal = False
+
+    if event.type in ('WHEELUPMOUSE', 'WHEELDOWNMOUSE') and inside(bounds.get('prompt')) and not command:
+        editor.scroll_by(-3 if event.type == 'WHEELUPMOUSE' else 3)
+        return {'RUNNING_MODAL'}
+    if event.type == 'LEFTMOUSE' and event.value == 'RELEASE' and HUD_STATE.get('text_drag'):
+        HUD_STATE['text_drag'] = None
+        return {'RUNNING_MODAL'}
+    if event.type in ('MOUSEMOVE', 'INBETWEEN_MOUSEMOVE') and HUD_STATE.get('text_drag') and focused:
+        if HUD_STATE['text_drag'] == 'scroll':
+            scrollbar_position()
+        else:
+            if ry > geometry['top'] + geometry['line_height']:
+                editor.scroll_by(-1)
+            elif ry < geometry['bottom']:
+                editor.scroll_by(1)
+            row, position = mouse_position()
+            editor.place(position, extend=True)
+            editor.row_hint = max(0, min(len(editor.lines) - 1, row))
+        return changed()
+    if event.type == 'LEFTMOUSE' and event.value in ('PRESS', 'DOUBLE_CLICK') and inside(bounds.get('prompt')):
+        HUD_STATE['typing'] = True
+        HUD_STATE['text_region'] = region_key
+        if inside(bounds.get('prompt_clear')):
+            editor.select_all()
+            editor.replace('')
+            HUD_STATE['text_drag'] = None
+        elif inside(bounds.get('prompt_scrollbar')):
+            scrollbar_position()
+            HUD_STATE['text_drag'] = 'scroll'
+        else:
+            row, position = mouse_position()
+            if event.value == 'DOUBLE_CLICK':
+                editor.select_word(position)
             else:
-                line = candidate
-        lines.append(line)
-    if len(lines) > max_lines:
-        lines = lines[-max_lines:]
-        lines[0] = _truncate_left(lines[0], max_w, size=size)
-    return lines
+                editor.place(position, extend=event.shift)
+                editor.row_hint = max(0, min(len(editor.lines) - 1, row))
+            HUD_STATE['text_drag'] = 'select'
+        return changed()
+    if focused and event.type in ('LEFTMOUSE', 'RIGHTMOUSE') and pressed and not inside(bounds.get('prompt')):
+        HUD_STATE['typing'] = False
+        HUD_STATE['text_drag'] = None
+        return None
+    if not focused:
+        return None
+    if not pressed:
+        return None
+    if event.type == 'ESC':
+        HUD_STATE['typing'] = False
+        HUD_STATE['text_drag'] = None
+        return {'RUNNING_MODAL'}
+    if event.type == 'TAB':
+        HUD_STATE['typing'] = False
+        HUD_STATE['text_drag'] = None
+        return {'RUNNING_MODAL'}
+    if command and event.type == 'A':
+        editor.select_all()
+    elif command and event.type in ('C', 'X'):
+        if editor.selected_text:
+            context.window_manager.clipboard = editor.selected_text
+            if event.type == 'X':
+                editor.replace('')
+    elif command and event.type == 'V':
+        clipboard = getattr(context.window_manager, 'clipboard', '')
+        try:
+            path = Path(clipboard.strip().strip('"\''))
+            if path.is_file() and path.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'):
+                from . import bridge_ui
+                bridge_ui.add_reference_images(context, [path])
+                return {'RUNNING_MODAL'}
+        except (OSError, ValueError):
+            pass
+        editor.replace(clipboard)
+    elif command and event.type in ('Z', 'Y'):
+        editor.undo(redo=event.type == 'Y' or event.shift)
+    elif event.type in ('LEFT_ARROW', 'RIGHT_ARROW', 'UP_ARROW', 'DOWN_ARROW', 'HOME', 'END', 'PAGE_UP', 'PAGE_DOWN'):
+        direction = event.type.replace('_ARROW', '').replace('_', '')
+        editor.move(direction, extend=event.shift, word=command, measure=measure)
+    elif event.type in ('BACK_SPACE', 'BACKSPACE', 'DEL'):
+        editor.delete(backward=event.type != 'DEL', word=command)
+    elif event.type in ('RET', 'NUMPAD_ENTER'):
+        if command:
+            _submit_agent_prompt(context)
+            return {'RUNNING_MODAL'}
+        editor.replace('\n')
+    elif not command and (not getattr(event, 'alt', False) or altgr):
+        text = getattr(event, 'unicode', '') or getattr(event, 'ascii', '')
+        if not text and event.type == 'SPACE':
+            text = ' '
+        if text and all(ord(character) >= 32 for character in text):
+            editor.replace(text, kind='typing')
+    return changed()
+
+
+def _prompt_pointer(context, active):
+    window = getattr(context, 'window', None)
+    if not window or active == HUD_STATE.get('text_pointer', False):
+        return
+    if active:
+        window.cursor_modal_set('TEXT')
+    else:
+        window.cursor_modal_restore()
+    HUD_STATE['text_pointer'] = active
+
+
+def _prompt_caret_tick():
+    if HUD_STATE['handler'] is None:
+        return None
+    if HUD_STATE['typing']:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+    return .4
 
 
 def _submit_agent_prompt(context):
@@ -310,6 +517,7 @@ def draw_viewport_hud():
         getattr(scene, 'blendrelay_hud_width', 780),
         getattr(scene, 'blendrelay_hud_scale', 1.0),
         getattr(scene, 'blendrelay_hud_adaptive', True),
+        manual_height=getattr(scene, 'blendrelay_hud_height', HUD_BASE_HEIGHT),
     )
     scale = metrics['scale']
     hud_w = metrics['width']
@@ -332,6 +540,8 @@ def draw_viewport_hud():
     bounds['total'] = (hud_x - 8.0, hud_y - 4.0, hud_w + 16.0, hud_h + 8.0)
 
     # Resize hit zones
+    bounds['resize_top'] = (hud_x, hud_y + hud_h - 5.0, hud_w, 10.0)
+    bounds['resize_bottom'] = (hud_x, hud_y - 5.0, hud_w, 10.0)
     bounds['resize_left'] = (hud_x - 7.0, hud_y, 14.0, hud_h)
     bounds['resize_right'] = (hud_x + hud_w - 7.0, hud_y, 14.0, hud_h)
     bounds['resize_corner'] = (hud_x + hud_w - 24.0 * scale, hud_y, 24.0 * scale, 24.0 * scale)
@@ -352,6 +562,12 @@ def draw_viewport_hud():
             _draw_edge_highlight(hud_x, hud_y, hud_h, scale, (0.0, 0.85, 1.0, 0.95))
         if hover in ('resize_right', 'resize_corner') or HUD_STATE.get('dragging') in ('resize_right', 'resize_corner'):
             _draw_edge_highlight(hud_x + hud_w, hud_y, hud_h, scale, (0.0, 0.85, 1.0, 0.95))
+
+    if hover in ('resize_top', 'resize_bottom') or HUD_STATE.get('dragging') in ('resize_top', 'resize_bottom'):
+        edge = HUD_STATE.get('dragging') or hover
+        edge_y = hud_y + hud_h - 2 if edge == 'resize_top' else hud_y
+        _draw_rounded_box(hud_x + hud_w * .35, edge_y, hud_w * .3, 2, 1,
+                          fill_color=(0.0, .85, 1.0, .95))
 
     # Corner grip slashes
     grip_x = hud_x + hud_w - 18.0 * scale
@@ -453,7 +669,7 @@ def draw_viewport_hud():
 
     # ── 3. Multi-line Prompt Field & Main Action Button ──────────────────────
     mid_y = hud_y + 12.0 * scale
-    mid_h = 68.0 * scale
+    mid_h = max(1.0, hud_h - 54.0 * scale)
 
     btn_w = 94.0 * scale
     btn_h = 34.0 * scale
@@ -509,7 +725,7 @@ def draw_viewport_hud():
     )
 
     # Clear button inside prompt box
-    prompt_text = getattr(scene, 'blendrelay_codex_prompt', '').strip()
+    prompt_text = getattr(scene, 'blendrelay_codex_prompt', '')
     if prompt_text:
         clear_w = 22.0 * scale
         clear_x = prompt_x + prompt_w - clear_w - 6.0 * scale
@@ -521,32 +737,8 @@ def draw_viewport_hud():
             fill_color=(0.20, 0.24, 0.32, 0.9) if clr_hover else (0.12, 0.15, 0.20, 0.7),
         )
         _draw_text_centered("✕", clear_x, clear_y, clear_w, 22.0 * scale, size=10 * scale, color=(0.85, 0.90, 0.95, 1.0))
-        max_text_w = prompt_w - 42.0 * scale
-    else:
-        max_text_w = prompt_w - 18.0 * scale
 
-    text_start_x = prompt_x + 12.0 * scale
-    avail_text_w = max_text_w
-
-    # Draw Prompt Content or Placeholder. Shift+Enter inserts a new line;
-    # Enter continues to run the prompt for fast single-line workflows.
-    line_h = 16.0 * scale
-    text_y = mid_y + mid_h - 22.0 * scale
-    if not prompt_text and not is_typing:
-        _draw_text("Describe what you want to create or change…", text_start_x, text_y, size=13 * scale, color=(0.42, 0.48, 0.58, 1.0))
-        _draw_text("Shift+Enter for a new line · Enter to run", text_start_x, text_y - line_h, size=10 * scale, color=(0.30, 0.36, 0.46, 1.0))
-    else:
-        prompt_lines = _wrap_prompt_text(prompt_text, avail_text_w, size=13 * scale)
-        for index, line in enumerate(prompt_lines):
-            _draw_text(line, text_start_x, text_y - index * line_h, size=13 * scale, color=(0.95, 0.97, 1.0, 1.0))
-
-        if is_typing and (int(time.monotonic() * 2.5) % 2 == 0):
-            font_id = 0
-            blf.size(font_id, max(9, int(13 * scale)))
-            last_line = prompt_lines[-1] if prompt_lines else ''
-            tw, _ = blf.dimensions(font_id, last_line)
-            cursor_y = text_y - (len(prompt_lines) - 1) * line_h
-            _draw_text('|', text_start_x + tw + 2.0 * scale, cursor_y, size=13 * scale, color=(0.0, 0.85, 1.0, 1.0))
+    _draw_prompt_editor(scene, bounds, prompt_x, mid_y, prompt_w, mid_h, scale, region)
 
     # Flash notification message
     now = time.monotonic()
@@ -564,6 +756,7 @@ def draw_viewport_hud():
         _draw_text_centered(msg, fx, fy, fw, 26.0 * scale, size=11 * scale, color=(0.3, 1.0, 0.6, 1.0))
 
     HUD_STATE['bounds'] = bounds
+    HUD_STATE['region_bounds'][region.as_pointer()] = bounds
 
 
 # ── Interactive Modal Controller ────────────────────────────────────────────
@@ -579,6 +772,8 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
             HUD_STATE['modal_active'] = False
             HUD_STATE['typing'] = False
             HUD_STATE['dragging'] = None
+            HUD_STATE['text_drag'] = None
+            _prompt_pointer(context, False)
             return {'CANCELLED'}
 
         # Find the VIEW_3D area and WINDOW region containing the cursor
@@ -600,13 +795,19 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                             break
 
         if not target_region:
+            _prompt_pointer(context, False)
+            if event.type in ('LEFTMOUSE', 'RIGHTMOUSE') and event.value == 'PRESS':
+                HUD_STATE['typing'] = False
+                HUD_STATE['text_drag'] = None
+            if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+                HUD_STATE['text_drag'] = None
             return {'PASS_THROUGH'}
 
         rx = mx - target_region.x
         ry = my - target_region.y
         HUD_STATE['last_mouse'] = (rx, ry)
 
-        bounds = HUD_STATE.get('bounds', {})
+        bounds = HUD_STATE['region_bounds'].get(target_region.as_pointer(), HUD_STATE.get('bounds', {}))
         total_bounds = bounds.get('total')
 
         def is_inside(rect):
@@ -614,6 +815,10 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 return False
             x0, y0, w0, h0 = rect
             return (x0 <= rx <= x0 + w0) and (y0 <= ry <= y0 + h0)
+
+        _prompt_pointer(context, is_inside(bounds.get('prompt')) and
+                        not is_inside(bounds.get('prompt_clear')) and
+                        not is_inside(bounds.get('prompt_scrollbar')))
 
         # ── Detect Dragged & Dropped Image onto HUD ──────────────────────────
         act = context.active_object
@@ -645,9 +850,22 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     getattr(scene, 'blendrelay_hud_width', 780),
                     getattr(scene, 'blendrelay_hud_scale', 1.0),
                     getattr(scene, 'blendrelay_hud_adaptive', True),
+                    manual_height=getattr(scene, 'blendrelay_hud_height', HUD_BASE_HEIGHT),
                 )
-                scale = metrics['scale']
+                scale = max(.001, HUD_STATE['drag_start_scale'])
                 start_mx, start_my = HUD_STATE['drag_start_mouse']
+
+                if dragging in ('resize_top', 'resize_bottom', 'resize_corner'):
+                    direction = 1 if dragging == 'resize_top' else -1
+                    start_h = HUD_STATE['drag_start_height']
+                    new_h = max(90.0, min(900.0, (target_region.height - HUD_VIEWPORT_MARGIN) / scale,
+                                          start_h + direction * (my - start_my) / scale))
+                    scene.blendrelay_hud_height = round(new_h)
+                    if direction < 0:
+                        scene.blendrelay_hud_y_offset = HUD_STATE['drag_start_offset'][1] - (new_h - start_h) * scale
+                    if dragging != 'resize_corner':
+                        target_area.tag_redraw()
+                        return {'RUNNING_MODAL'}
 
                 if dragging in ('resize_right', 'resize_corner'):
                     dx = (mx - start_mx) / scale
@@ -672,6 +890,11 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
+        result = _handle_prompt_event(context, event, bounds, rx, ry, target_region.as_pointer())
+        if result is not None:
+            target_area.tag_redraw()
+            return result
+
         # ── Mouse Wheel Zoom / Scale (Ctrl + Wheel) ─────────────────────────
         if event.ctrl and is_inside(total_bounds):
             if event.type == 'WHEELUPMOUSE':
@@ -690,8 +913,8 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
             new_hover = None
             # Prioritize interactive buttons and resize handles
             check_keys = (
-                'resize_corner', 'resize_left', 'resize_right',
-                'btn_action', 'prompt', 'prompt_clear', 'btn_close', 'btn_console',
+                'resize_corner', 'resize_top', 'resize_bottom', 'resize_left', 'resize_right',
+                'btn_action', 'prompt_clear', 'prompt', 'btn_close', 'btn_console',
                 'scale_up', 'scale_down', 'scale_reset',
                 'header_drag',
             )
@@ -708,88 +931,11 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 HUD_STATE['hover'] = None
                 target_area.tag_redraw()
 
-        # ── Text Input / Typing Mode ────────────────────────────────────────
-        if HUD_STATE.get('typing'):
-            if event.type in ('LEFTMOUSE', 'RIGHTMOUSE') and event.value == 'PRESS':
-                if not is_inside(bounds.get('prompt')):
-                    HUD_STATE['typing'] = False
-                    target_area.tag_redraw()
-                    if not is_inside(total_bounds):
-                        return {'PASS_THROUGH'}
-
-            elif event.type == 'ESC' and event.value == 'PRESS':
-                HUD_STATE['typing'] = False
-                target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            elif event.type in ('RET', 'NUMPAD_ENTER') and event.value == 'PRESS':
-                if event.shift:
-                    context.scene.blendrelay_codex_prompt += '\n'
-                else:
-                    _submit_agent_prompt(context)
-                target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            elif event.type in ('BACK_SPACE', 'BACKSPACE') and event.value == 'PRESS':
-                cur = context.scene.blendrelay_codex_prompt
-                if cur:
-                    if event.ctrl:
-                        parts = cur.rstrip().rsplit(' ', 1)
-                        context.scene.blendrelay_codex_prompt = (parts[0] + ' ') if len(parts) > 1 else ''
-                    else:
-                        context.scene.blendrelay_codex_prompt = cur[:-1]
-                    target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            elif event.type == 'DEL' and event.value == 'PRESS':
-                cur = context.scene.blendrelay_codex_prompt
-                if cur:
-                    context.scene.blendrelay_codex_prompt = cur[:-1]
-                    target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            elif event.type == 'V' and event.ctrl and event.value == 'PRESS':
-                raw_clip = getattr(context.window_manager, 'clipboard', '').strip().strip('"\'')
-                try:
-                    p = Path(raw_clip)
-                    if p.is_file() and p.suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'):
-                        from . import bridge_ui
-                        bridge_ui.add_reference_images(context, [p])
-                        target_area.tag_redraw()
-                        return {'RUNNING_MODAL'}
-                except Exception:
-                    pass
-                if raw_clip:
-                    clean_clip = raw_clip.replace('\r\n', '\n')
-                    context.scene.blendrelay_codex_prompt += clean_clip
-                    target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            elif event.type == 'C' and event.ctrl and event.value == 'PRESS':
-                context.window_manager.clipboard = context.scene.blendrelay_codex_prompt
-                HUD_STATE['flash_msg'] = 'Copied to clipboard'
-                HUD_STATE['flash_time'] = time.monotonic()
-                target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            elif event.type == 'SPACE' and event.value == 'PRESS':
-                context.scene.blendrelay_codex_prompt += ' '
-                target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            elif event.ascii and event.value == 'PRESS' and ord(event.ascii) >= 32:
-                context.scene.blendrelay_codex_prompt += event.ascii
-                target_area.tag_redraw()
-                return {'RUNNING_MODAL'}
-
-            if event.type not in ('MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'):
-                return {'RUNNING_MODAL'}
-
         # ── Click & Drag Initiations on Floating Elements ────────────────────
         if is_inside(total_bounds):
             if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
                 # 1. Resize handles initiation
-                for rkey in ('resize_corner', 'resize_right', 'resize_left'):
+                for rkey in ('resize_corner', 'resize_top', 'resize_bottom', 'resize_right', 'resize_left'):
                     if is_inside(bounds.get(rkey)):
                         # A direct resize is an explicit request for manual
                         # width. Preserve the currently visible auto width so
@@ -800,8 +946,9 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                             getattr(scene, 'blendrelay_hud_width', 780),
                             getattr(scene, 'blendrelay_hud_scale', 1.0),
                             getattr(scene, 'blendrelay_hud_adaptive', True),
+                            manual_height=getattr(scene, 'blendrelay_hud_height', HUD_BASE_HEIGHT),
                         )
-                        if getattr(scene, 'blendrelay_hud_adaptive', True):
+                        if rkey not in ('resize_top', 'resize_bottom') and getattr(scene, 'blendrelay_hud_adaptive', True):
                             scene.blendrelay_hud_adaptive = False
                             # Store both the effective scale and the matching
                             # design width.  This keeps text, controls, and
@@ -814,7 +961,9 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                         HUD_STATE['dragging'] = rkey
                         HUD_STATE['drag_start_mouse'] = (mx, my)
                         HUD_STATE['drag_start_width'] = float(scene.blendrelay_hud_width)
-                        HUD_STATE['drag_start_scale'] = float(scene.blendrelay_hud_scale)
+                        HUD_STATE['drag_start_scale'] = metrics['scale']
+                        HUD_STATE['drag_start_height'] = metrics['height'] / metrics['scale']
+                        HUD_STATE['drag_start_offset'] = (scene.blendrelay_hud_x_offset, scene.blendrelay_hud_y_offset)
                         target_area.tag_redraw()
                         return {'RUNNING_MODAL'}
 
@@ -834,6 +983,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                 if is_inside(bounds.get('scale_reset')):
                     scene.blendrelay_hud_scale = 1.0
                     scene.blendrelay_hud_width = 780
+                    scene.blendrelay_hud_height = 122
                     scene.blendrelay_hud_adaptive = True
                     scene.blendrelay_hud_x_offset = 0.0
                     scene.blendrelay_hud_y_offset = 0.0
@@ -851,23 +1001,6 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 
-                # 4. Prompt Input Area (Focus typing)
-                if is_inside(bounds.get('prompt')):
-                    if is_inside(bounds.get('prompt_clear')):
-                        context.scene.blendrelay_codex_prompt = ''
-                        HUD_STATE['typing'] = False
-                    else:
-                        HUD_STATE['typing'] = True
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
-                # 5. Clear prompt button
-                if is_inside(bounds.get('prompt_clear')):
-                    context.scene.blendrelay_codex_prompt = ''
-                    HUD_STATE['typing'] = False
-                    target_area.tag_redraw()
-                    return {'RUNNING_MODAL'}
-
                 # 6. Console Toggle Button
                 if is_inside(bounds.get('btn_console')):
                     if hasattr(bpy.ops.wm, 'console_toggle'):
@@ -880,6 +1013,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
                     context.scene.blendrelay_show_viewport_hud = False
                     HUD_STATE['modal_active'] = False
                     HUD_STATE['typing'] = False
+                    _prompt_pointer(context, False)
                     target_area.tag_redraw()
                     return {'CANCELLED'}
 
@@ -922,9 +1056,17 @@ def register_hud():
         HUD_STATE['handler'] = bpy.types.SpaceView3D.draw_handler_add(
             draw_viewport_hud, (), 'WINDOW', 'POST_PIXEL'
         )
+    if not bpy.app.timers.is_registered(_prompt_caret_tick):
+        bpy.app.timers.register(_prompt_caret_tick, first_interval=.4)
 
 
 def unregister_hud():
+    _prompt_pointer(bpy.context, False)
+    HUD_STATE['text_drag'] = None
+    HUD_STATE['text_region'] = None
+    HUD_STATE['region_bounds'].clear()
+    if bpy.app.timers.is_registered(_prompt_caret_tick):
+        bpy.app.timers.unregister(_prompt_caret_tick)
     """Unregister the viewport 2D draw handler."""
     if HUD_STATE['handler'] is not None:
         bpy.types.SpaceView3D.draw_handler_remove(HUD_STATE['handler'], 'WINDOW')

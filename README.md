@@ -66,7 +66,9 @@ uvx blendrelay-mcp setup --blender-version 4.5
 5. Select the **BlendRelay** tab.
 6. Click **Connect**.
 
-The floating HUD can be shown or hidden from the panel. Its prompt supports multiple lines: use `Shift+Enter` for a new line and `Enter` to run.
+The floating HUD can be shown or hidden from the panel. Its prompt supports multiple lines: use `Enter` for a new line and `Ctrl+Enter` to run. Click to position the cursor, drag to select text, and scroll to review longer prompts. Arrow keys, Home/End, selection, clipboard shortcuts, and undo/redo work inside the prompt.
+
+The viewport prompt editor can be resized vertically by dragging its top or bottom edge. Drag the bottom-right grip to adjust width and height together. Height can also be set in Settings → Viewport HUD.
 
 ## Connect your AI agent
 
