@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "blendrelay_mcp"
-version = "0.7.5"
+version = "0.7.6"
 name = "BlendRelay MCP"
 tagline = "Create, edit, rig, and animate in Blender with AI agents"
 maintainer = "Shefq <https://github.com/shefq>"
