@@ -16,7 +16,7 @@ from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, F
 from .client import Connection,default_root
 from . import edit_context, workflow, run_metrics, conversation, agent_permissions
 from . import general, sketch, viewport_hud, target_region
-from . import asset_ui, claude_model_discovery
+from . import asset_ui, claude_model_discovery, hud_preferences
 
 STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
            codex_process=None,codex_output=None,codex_log=None,codex_started=0,
@@ -2051,6 +2051,7 @@ def register():
         default=True,
     )
     bpy.types.Scene.blendrelay_hud_width = IntProperty(
+        update=hud_preferences.changed,
         name='HUD Width',
         description='Width of the floating AI command bar when Adaptive Size is disabled',
         default=780,
@@ -2058,16 +2059,19 @@ def register():
         max=4000,
     )
     bpy.types.Scene.blendrelay_hud_height = IntProperty(
+        update=hud_preferences.changed,
         name='HUD Height',
         description='Height of the floating prompt editor; drag its top or bottom edge to show more or fewer lines',
         default=122, min=90, max=900,
     )
     bpy.types.Scene.blendrelay_hud_adaptive = BoolProperty(
+        update=hud_preferences.changed,
         name='Adaptive HUD Size',
         description='Automatically size the HUD from the available 3D Viewport area',
         default=True,
     )
     bpy.types.Scene.blendrelay_hud_scale = FloatProperty(
+        update=hud_preferences.changed,
         name='HUD Scale',
         description='Fine-tune the adaptive or manual HUD size multiplier',
         default=1.0,
@@ -2077,16 +2081,19 @@ def register():
         precision=2,
     )
     bpy.types.Scene.blendrelay_hud_x_offset = FloatProperty(
+        update=hud_preferences.changed,
         name='HUD X Offset',
         description='Horizontal position offset in the viewport',
         default=0.0,
     )
     bpy.types.Scene.blendrelay_hud_y_offset = FloatProperty(
+        update=hud_preferences.changed,
         name='HUD Y Offset',
         description='Vertical position offset in the viewport',
         default=0.0,
     )
 
+    hud_preferences.register()
     sketch.register_overlay()
     viewport_hud.register_hud()
     refresh_models_async()
@@ -2094,6 +2101,7 @@ def register():
 
 
 def unregister():
+    hud_preferences.unregister()
     asset_ui.unregister()
     if bpy.app.timers.is_registered(timer):
         bpy.app.timers.unregister(timer)
