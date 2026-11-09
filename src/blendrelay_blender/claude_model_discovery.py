@@ -63,7 +63,8 @@ def discover_models(executable, timeout=20):
                '--strict-mcp-config', '--mcp-config', json.dumps({'mcpServers': {}}),
                '--settings', json.dumps({'disableAllHooks': True}), '--tools', '']
     try:
-        with tempfile.TemporaryDirectory(prefix='blendrelay-models-') as directory:
+        # Blender may quit while the CLI still runs; a leftover empty folder is harmless.
+        with tempfile.TemporaryDirectory(prefix='blendrelay-models-', ignore_cleanup_errors=True) as directory:
             completed = subprocess.run(
                 command, input=json.dumps(request) + '\n', capture_output=True,
                 text=True, encoding='utf-8', errors='replace', timeout=timeout,

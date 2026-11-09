@@ -127,8 +127,10 @@ class OptimizationTests(unittest.TestCase):
         self.assertEqual(m.summary()['tool_calls_by_stage'],{'inspection':1})
         self.assertEqual(m.summary()['provider_usage']['input_tokens'],10)
         claude=Metrics()
-        claude.feed(json.dumps({'type':'stream_event','event':{'type':'content_block_start',
-            'content_block':{'type':'tool_use','id':'tool-1','name':'mcp__blendrelay__inspect_scene','input':{}}}}))
+        block={'type':'tool_use','id':'tool-1','name':'mcp__blendrelay__inspect_scene','input':{}}
+        claude.feed(json.dumps({'type':'stream_event','event':{'type':'content_block_start','content_block':block}}))
+        claude.feed(json.dumps({'type':'assistant','message':{'content':[block]}}))
+        claude.feed(json.dumps({'type':'assistant','message':{'content':[block]}}))  # counted once
         claude.feed(json.dumps({'type':'result','usage':{'input_tokens':7,'output_tokens':3}}))
         self.assertEqual(claude.summary()['provider_usage']['output_tokens'],3)
         self.assertEqual(sum(claude.summary()['tool_calls_by_stage'].values()),1)

@@ -10,7 +10,9 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = "MIT AND GPL-3.0-or-later"
 license-files = ["LICENSE", "src/blendrelay_blender/COPYING.txt"]
-dependencies = []
+dependencies = [
+    "Pillow>=10",
+]
 keywords = [
     "blender",
     "blender-addon",

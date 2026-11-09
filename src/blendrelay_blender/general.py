@@ -643,8 +643,43 @@ def draw_sketch_on_image(path, strokes):
     bpy.data.images.remove(image)
 
 
+CAPTURE_KEEP = 40
+CAPTURE_MAX_AGE = 6 * 60 * 60
+TRANSPORT_BUDGET = 450000
+
+
+def _capture_dir(root):
+    """Unique per-capture files, so a later capture never overwrites one being read.
+
+    Captures may be attached to prompts as reference images, so only old files
+    beyond the newest CAPTURE_KEEP are pruned.
+    """
+    directory = workspace_root(root) / 'captures'
+    directory.mkdir(parents=True, exist_ok=True)
+    files = sorted((p for p in directory.iterdir() if p.is_file()),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    cutoff = time.time() - CAPTURE_MAX_AGE
+    for stale in files[CAPTURE_KEEP:]:
+        if stale.stat().st_mtime < cutoff:
+            stale.unlink(missing_ok=True)
+    return directory
+
+
+def _shrink_to_jpeg(source, target, max_side, quality):
+    """Re-encode an image as JPEG without touching the scene's render settings."""
+    img = bpy.data.images.load(str(source), check_existing=False)
+    try:
+        w, h = img.size
+        if max(w, h) > max_side:
+            factor = max_side / max(w, h)
+            img.scale(max(1, round(w * factor)), max(1, round(h * factor)))
+        img.file_format = 'JPEG'
+        img.save(filepath=str(target), quality=quality)
+    finally:
+        bpy.data.images.remove(img)
+
+
 def screenshot(root, context=None, max_dimension=512):
-    import base64
     area = (getattr(context, 'area', None)
             if context and getattr(context, 'area', None) and context.area.type == 'VIEW_3D'
             else None)
@@ -667,7 +702,7 @@ def screenshot(root, context=None, max_dimension=512):
     r = scene.render
     old = (r.filepath, r.resolution_x, r.resolution_y,
            r.resolution_percentage, r.image_settings.file_format)
-    path = workspace_root(root) / 'sketch_viewport.png'
+    path = _capture_dir(root) / (uuid.uuid4().hex + '.png')
     try:
         max_dim = max(128, min(1920, int(max_dimension)))
         rw, rh = max(1, region.width), max(1, region.height)
@@ -683,44 +718,21 @@ def screenshot(root, context=None, max_dimension=512):
         with bpy.context.temp_override(window=window, area=area, region=region):
             bpy.ops.render.opengl(write_still=True, view_context=True)
         draw_sketch_on_image(path, sketch.strokes(scene))
-        data = path.read_bytes()
         mime_type = 'image/png'
 
-        # Auto-optimize for AI transport if uncompressed PNG exceeds transport budget
-        max_safe_bytes = 450000
-        if len(data) > max_safe_bytes:
+        # Keep images within the model's useful vision budget. The image is
+        # returned by path: the MCP gateway reads it from disk, so large
+        # captures never pass through the 1 MiB runtime control channel.
+        if path.stat().st_size > TRANSPORT_BUDGET:
             jpg_path = path.with_suffix('.jpg')
-            img = bpy.data.images.load(str(path), check_existing=False)
-            try:
-                w, h = img.size
-                if max(w, h) > 720:
-                    scale_factor = 720.0 / max(w, h)
-                    img.scale(max(1, round(w * scale_factor)), max(1, round(h * scale_factor)))
-                img.file_format = 'JPEG'
-                img.filepath_raw = str(jpg_path)
-                r.image_settings.quality = 85
-                img.save()
-            finally:
-                bpy.data.images.remove(img)
-
+            _shrink_to_jpeg(path, jpg_path, 720, 85)
+            if jpg_path.is_file() and jpg_path.stat().st_size > TRANSPORT_BUDGET:
+                _shrink_to_jpeg(jpg_path, jpg_path, 540, 70)
             if jpg_path.is_file():
-                jpg_data = jpg_path.read_bytes()
-                if len(jpg_data) > max_safe_bytes:
-                    img2 = bpy.data.images.load(str(jpg_path), check_existing=False)
-                    try:
-                        w2, h2 = img2.size
-                        img2.scale(max(1, round(w2 * 0.75)), max(1, round(h2 * 0.75)))
-                        r.image_settings.quality = 70
-                        img2.save()
-                    finally:
-                        bpy.data.images.remove(img2)
-                    jpg_data = jpg_path.read_bytes()
+                path.unlink(missing_ok=True)
+                path, mime_type = jpg_path, 'image/jpeg'
 
-                data = jpg_data
-                path = jpg_path
-                mime_type = 'image/jpeg'
-
-        return dict(image=base64.b64encode(data).decode(), mime_type=mime_type,
+        return dict(image_path=str(path), mime_type=mime_type, bytes=path.stat().st_size,
                     path=str(path), sketch_overlay=bool(sketch.strokes(scene)))
     finally:
         (r.filepath, r.resolution_x, r.resolution_y,

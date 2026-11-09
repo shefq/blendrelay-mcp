@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Dependable, focused camera inspection with evaluated bounds, matrix replay, and occlusion diagnostics."""
-import base64
 import math
 from pathlib import Path
 import uuid
@@ -133,6 +132,14 @@ def _evaluate_visibility_and_occluders(scene, depsgraph, camera_pos, target_cent
     return visibility_score, sorted(list(occluders))
 
 
+def normalize_padding(padding):
+    """Accept a margin fraction (0.15) or the scale factor agents often send (1.15 = 15% margin)."""
+    value = float(padding)
+    if value > 1:
+        value -= 1
+    return max(0.0, value)
+
+
 def capture(root, target_objects=(), camera_position_hints=None, context_mode="targets_and_nearby",
             padding=0.15, max_dimension=768, render_mode="auto", camera_matrix_world=None,
             lens_mm=50, cycles_samples=32, **kwargs):
@@ -141,6 +148,7 @@ def capture(root, target_objects=(), camera_position_hints=None, context_mode="t
         target_objects = [target_objects]
     if not target_objects:
         raise ValueError("target_objects must contain at least one object name")
+    padding = normalize_padding(padding)
 
     resolved_objects = []
     missing_objects = []
@@ -331,8 +339,9 @@ def capture(root, target_objects=(), camera_position_hints=None, context_mode="t
             bpy.context.view_layer.update()
             bpy.ops.render.render(write_still=True)
 
-            img_bytes = img_path.read_bytes() if img_path.is_file() else b''
-            b64_data = base64.b64encode(img_bytes).decode('ascii') if img_bytes else ''
+            # Images travel by path: the MCP gateway reads them from disk, so
+            # several large renders never exceed the 1 MiB runtime frame.
+            img_size = img_path.stat().st_size if img_path.is_file() else 0
 
             cam_mat_flat = [round(float(v), 6) for row in camera_obj.matrix_world for v in row]
 
@@ -349,8 +358,8 @@ def capture(root, target_objects=(), camera_position_hints=None, context_mode="t
                 'adjustments': adjustments,
             }
             views_result.append(view_info)
-            if b64_data:
-                images_result.append({'data': b64_data, 'mime_type': 'image/jpeg'})
+            if img_size:
+                images_result.append({'path': str(img_path), 'mime_type': 'image/jpeg', 'bytes': img_size})
 
     finally:
         # ── State Restoration (Guaranteed) ──────────────────────────────

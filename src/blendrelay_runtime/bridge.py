@@ -7,7 +7,10 @@ from blendrelay_runtime.errors import DomainError
 from blendrelay_blender.version import VERSION
 
 LIVE_SESSION_SECONDS = 90
+# Features this runtime's gateway supports; Blender adapts results to them.
+RUNTIME_FEATURES = ['image_paths']
 BUSY_SESSION_SECONDS = 15 * 60
+TERMINAL_STATUSES = ('complete', 'failed', 'interrupted', 'cancelled')
 
 
 class Bridge:
@@ -25,7 +28,7 @@ class Bridge:
                 job = json.loads(path.read_text())
             except (OSError, ValueError):
                 continue
-            if job.get('status') in ('complete', 'failed', 'interrupted', 'cancelled') and job.get('created_at', 0) < cutoff:
+            if job.get('status') in TERMINAL_STATUSES and job.get('created_at', 0) < cutoff:
                 path.unlink()
                 continue
             if mark_uncertain and job.get('status') in ('queued', 'running'):
@@ -46,8 +49,12 @@ class Bridge:
             raise DomainError('UNKNOWN_JOB', operation_id)
         return json.loads(path.read_text())
 
-    def rpc_blender_job(self, operation_id, instance_id=None, **kwargs):
+    def rpc_blender_job(self, operation_id, instance_id=None, internal=False, **kwargs):
         job = self._job(operation_id)
+        if internal:
+            # The gateway's own waiting loop is bounded by wait_seconds and task
+            # lifetimes; only agent-initiated status reads count toward the limit.
+            return job
         job['poll_count'] = job.get('poll_count', 0) + 1
         if job['poll_count'] > 1200 and job.get('status') in ('queued', 'running'):
             raise DomainError('POLL_LIMIT', 'This job exceeded the long-operation status limit; inspect Blender')
@@ -88,8 +95,8 @@ class Bridge:
             if job['instance_id'] == instance_id and job['status'] == 'queued':
                 job['status'] = 'running'
                 self._write_job(job)
-                return {'command': job}
-        return {'command': None}
+                return {'command': job, 'features': RUNTIME_FEATURES}
+        return {'command': None, 'features': RUNTIME_FEATURES}
 
     def rpc_budget_claim(self, kind='other', instance_id=None, operation_id=None):
         if kind not in ('read', 'edit', 'poll', 'asset'):
@@ -176,13 +183,29 @@ class Bridge:
         path = self.bridge_dir / (operation_id + '.json')
         if path.exists():
             old = self._job(operation_id)
-            if old['fingerprint'] != fingerprint:
-                raise DomainError('ID_REUSED', 'Operation ID was already used with different arguments')
-            return old
+            # Agents reuse readable IDs ("spray_inspect_01") across runs. A finished
+            # job from another Blender session cannot be a retry of this request,
+            # so its ID is free again; within one session the guard still applies.
+            stale = old.get('instance_id') != instance_id and old.get('status') in TERMINAL_STATUSES
+            if old['fingerprint'] != fingerprint and not stale:
+                raise DomainError('ID_REUSED', 'Operation ID was already used with different arguments '
+                                  'in this Blender session; choose a new operation_id')
+            if not stale:
+                return old
         job = dict(operation_id=operation_id, instance_id=instance_id, action=action, arguments=arguments or {},
                  fingerprint=fingerprint, status='queued', created_at=time.time(), poll_count=0)
         self._write_job(job)
         return job
+
+    def rpc_blender_cancel(self, operation_id, instance_id=None):
+        """Cancel a job Blender has not picked up yet; running jobs finish normally."""
+        job = self._job(operation_id)
+        if instance_id is not None and job['instance_id'] != instance_id:
+            raise DomainError('WRONG_INSTANCE', 'Job belongs to another Blender instance')
+        if job['status'] == 'queued':
+            job.update(status='cancelled', error='Cancelled before Blender started it.')
+            self._write_job(job)
+        return {'operation_id': operation_id, 'status': job['status']}
 
     def rpc_blender_ack(self, instance_id, operation_id, result=None, error=None):
         job = self._job(operation_id)

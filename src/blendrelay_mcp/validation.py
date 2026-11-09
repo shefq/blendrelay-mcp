@@ -45,5 +45,6 @@ def validate(value, schema, path='arguments', depth=0):
             raise SchemaError(f'{path} has an invalid length')
     elif kind in ('integer', 'number'):
         if value < schema.get('minimum', value) or value > schema.get('maximum', value):
-            raise SchemaError(f'{path} is outside the allowed range')
+            bounds = [f'{label} {schema[key]}' for key, label in (('minimum', 'minimum'), ('maximum', 'maximum')) if key in schema]
+            raise SchemaError(f'{path} is outside the allowed range ({", ".join(bounds)})')
     return value

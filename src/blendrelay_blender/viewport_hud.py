@@ -460,7 +460,7 @@ def _prompt_caret_tick():
 def _submit_agent_prompt(context):
     """Submit from the HUD without allowing operator errors to escape the modal."""
     scene = context.scene
-    backend = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
+    backend = getattr(scene, 'blendrelay_agent_backend', 'CODEX')
     agent_name = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude'}.get(backend, 'AI agent')
 
     if not getattr(scene, 'blendrelay_codex_prompt', '').strip():

@@ -128,12 +128,29 @@ class Service(Bridge, AssetService):
         return {"source_id": source_id, "path": str(destination),
                 "next_step": "Use this image as visual context for the requested Blender operation."}
 
+    # Generated previews live in the shared root (older releases) or in each scene
+    # workspace; registered sources live only in the shared root. Agents also save
+    # final renders inside the scene workspace, so images there are readable
+    # (rpc_artifact_read still accepts image types only).
+    SHARED_ARTIFACT_DIRS = ("sources", "focused_views", "selection_views")
+
+    def _readable_artifact(self, artifact):
+        root = self.storage.root.resolve()
+        if any(artifact.is_relative_to(root / name) for name in self.SHARED_ARTIFACT_DIRS):
+            return True
+        workspaces = root / "workspaces"
+        if not artifact.is_relative_to(workspaces):
+            return False
+        # Any image inside a scene workspace (renders/, the workspace root, previews):
+        # agents choose their own render folders. Only image types are ever returned.
+        return len(artifact.relative_to(workspaces).parts) >= 2
+
     def rpc_artifact_read(self, path, offset=0, limit=524288):
         import base64
         artifact = Path(path).resolve()
-        allowed = ("sources", "focused_views", "selection_views")
-        if not any(artifact.is_relative_to(self.storage.root / name) for name in allowed) or not artifact.is_file():
-            raise BlendRelayError("ARTIFACT_NOT_ALLOWED", "Only registered and generated visual artifacts can be read")
+        if not self._readable_artifact(artifact) or not artifact.is_file():
+            raise BlendRelayError("ARTIFACT_NOT_ALLOWED", "Only registered and generated visual artifacts can be read. "
+                                  "Save renders in the scene workspace folder, or register other images with blendrelay_register_source")
         if artifact.stat().st_size > 20 * 1024 * 1024:
             raise BlendRelayError("RESOURCE_LIMIT", "Artifact is too large")
         if not isinstance(offset, int) or not isinstance(limit, int) or offset < 0 or not 1 <= limit <= 524288:

@@ -3,6 +3,7 @@ import argparse
 import base64
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import uuid
 
 from blendrelay_runtime.errors import DomainError
 from blendrelay_runtime.protocol import Client, data_dir
-from .job_results import wait_and_compact
+from .job_results import MIN_AGENT_WAIT_SECONDS, wait_and_compact
 from .validation import SchemaError, validate
 
 from blendrelay_blender.version import VERSION
@@ -33,7 +34,7 @@ STR={'type':'string'};SHORT={'type':'string','maxLength':200};ID={'type':'string
 NUM={'type':'number'};BOOL={'type':'boolean'}
 VEC3={'type':'array','items':NUM,'minItems':3,'maxItems':3}
 RGBA={'type':'array','items':NUM,'minItems':3,'maxItems':4}
-CONTROL={'operation_id':ID,'instance_id':ID,'wait_seconds':{'type':'number','minimum':0,'maximum':30},'repeat_result':BOOL}
+CONTROL={'operation_id':ID,'instance_id':ID,'wait_seconds':{'type':'number','minimum':0,'maximum':30,'description':'Longest time to wait for the job; returns as soon as it finishes. A job still running is waited on for at least 20 s, so prefer one call over repeated short checks.'},'repeat_result':BOOL}
 JOB_OUTPUT=obj({'operation_id':ID,'instance_id':ID,'action':STR,
     'status':{'enum':['queued','running','complete','failed','interrupted','cancelled']},
     'error':{},'result':{},'unchanged':BOOL,'next_step':STR},('operation_id','status'))
@@ -55,7 +56,7 @@ CAPABILITIES_OUTPUT=obj({'product':STR,'version':STR,'protocol_version':{'type':
     'image_workflow':STR},('product','version','mcp_protocol','general_blender'))
 SOURCE_OUTPUT=obj({'source_id':ID,'path':STR,'next_step':STR},('source_id','path','next_step'))
 ARTIFACT_OUTPUT=obj({'mime_type':STR,'offset':{'type':'integer'},'eof':BOOL,
-    'total_bytes':{'type':'integer'}},('mime_type','offset','eof','total_bytes'))
+    'total_bytes':{'type':'integer'},'note':STR},('mime_type','offset','eof','total_bytes'))
 ANY_OBJECT={'$schema':'https://json-schema.org/draft/2020-12/schema','type':'object','additionalProperties':False}
 
 TOOLS={}
@@ -92,7 +93,9 @@ tool('capture_focused_view','Capture Focused View','blender.submit',
       'target_objects':{'type':'array','items':SHORT,'minItems':1,'maxItems':50},
       'camera_position_hints':{'type':'array','items':VEC3,'maxItems':4},
       'context_mode':{'enum':['full_scene','targets_and_nearby','targets_only']},
-      'padding':{'type':'number','minimum':0,'maximum':0.8},
+      'padding':{'type':'number','minimum':0,'maximum':3,
+                 'description':'Margin around the targets as a fraction of the frame, e.g. 0.15 for 15%. '
+                               'A scale factor above 1 is also accepted (1.25 means a 25% margin). Effective margin is 2-45%.'},
       'max_dimension':{'type':'integer','minimum':128,'maximum':2048,'description':'Render max dimension (capped at 512 for cycles)'},
       'render_mode':{'enum':['auto','workbench','eevee','cycles']},
       'camera_matrix_world':{'type':'array','items':NUM,'minItems':16,'maxItems':16},
@@ -142,17 +145,46 @@ tool('blendrelay_read_artifact','Read BlendRelay Artifact','artifact.read','Read
 
 PUBLIC_TOOLS=tuple(TOOLS);ASYNC_ASSET={'search_assets','import_asset','list_cached_assets','refresh_asset_cache'}
 BUDGET_TOOLS=set(PUBLIC_TOOLS)-{'blendrelay_get_capabilities','blendrelay_register_source','blendrelay_read_artifact'}
-TASKS={};TASK_LOCK=threading.RLock();MAX_TASKS=8;MAX_TASK_TTL=3600000;MAX_TASK_POLLS=120
+# MAX_TASK_POLLS is a safety net only; with poll_interval() a full 1 h task needs ~790 polls,
+# below the runtime's 1200 status reads per job.
+TASKS={};TASK_LOCK=threading.RLock();MAX_TASKS=8;MAX_TASK_TTL=3600000;MAX_TASK_POLLS=1000
+
+WMI_START=r"""
+$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+  CommandLine=$env:BLENDRELAY_RUNTIME_COMMAND; CurrentDirectory=$env:BLENDRELAY_RUNTIME_CWD; ProcessStartupInformation=$si }
+exit [int]$r.ReturnValue
+"""
+
+def _start_outside_job(command,root):
+    """Start the runtime through WMI so it is not a child of the agent's job object."""
+    line=subprocess.list2cmdline(command)+' >> '+subprocess.list2cmdline([str(root/'runtime.log')])+' 2>&1'
+    env=dict(os.environ,BLENDRELAY_RUNTIME_COMMAND='cmd.exe /d /s /c "'+line+'"',BLENDRELAY_RUNTIME_CWD=str(Path.cwd()))
+    try:
+        done=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',WMI_START],
+                            env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                            timeout=20,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        return done.returncode==0
+    except (OSError,subprocess.SubprocessError):
+        return False
 
 def ensure_runtime(root):
     client=Client(root,timeout=1)
     try:client.call('capabilities');return
     except (DomainError,OSError):pass
     root=Path(root);root.mkdir(parents=True,exist_ok=True)
-    with open(root/'runtime.log','ab') as log:
-        subprocess.Popen([sys.executable,'-m','blendrelay_runtime.cli','--data-dir',str(root),'serve','--allow-source-root',str(Path.cwd())],
-                         stdin=subprocess.DEVNULL,stdout=log,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-    for _ in range(60):
+    command=[sys.executable,'-m','blendrelay_runtime.cli','--data-dir',str(root),'serve','--allow-source-root',str(Path.cwd())]
+    # The runtime is shared by Blender and every agent session, so it must outlive
+    # the agent process that happened to start it. Agent CLIs (e.g. Codex) run MCP
+    # servers in a Windows job that kills its processes when the run ends; Blender
+    # then loses its connection until the next run.
+    if not (os.name=='nt' and _start_outside_job(command,root)):
+        flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
+        with open(root/'runtime.log','ab') as log:
+            try:subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=log,stderr=log,
+                                 creationflags=flags|getattr(subprocess,'CREATE_BREAKAWAY_FROM_JOB',0))
+            except OSError:subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=log,stderr=log,creationflags=flags)
+    for _ in range(80):
         try:client.call('capabilities');return
         except (DomainError,OSError):time.sleep(.1)
     raise DomainError('RUNTIME_OFFLINE','Runtime could not start; see runtime.log')
@@ -164,37 +196,112 @@ def invoke_raw(definition,args,client,task_mode=False):
         control={k:args[k] for k in CONTROL if k in args};action_args={k:v for k,v in args.items() if k not in CONTROL}
         control.update(action=definition['_action'],arguments=action_args)
         if task_mode:control['wait_seconds']=0
-        return wait_and_compact(client,'blender.submit',control)
-    if definition['_method']=='blender.job':return wait_and_compact(client,'blender.job',args)
+        # Task mode returns at once and waits in the background instead.
+        return wait_and_compact(client,'blender.submit',control,min_wait=0 if task_mode else MIN_AGENT_WAIT_SECONDS)
+    if definition['_method']=='blender.job':
+        return wait_and_compact(client,'blender.job',args,min_wait=0 if task_mode else MIN_AGENT_WAIT_SECONDS)
     return client.call(definition['_method'],args)
 
+def poll_interval(elapsed):
+    """Back off so long Blender work stays well under the runtime's per-job status limit."""
+    return .5 if elapsed<10 else 1. if elapsed<60 else 3. if elapsed<120 else 5.
+
+def cancel_job(name,raw,client):
+    """Best effort: a job Blender has not started is cancelled; running Blender code cannot be interrupted."""
+    if name in ASYNC_ASSET or not raw.get('operation_id'):return
+    try:client.call('blender.cancel',{'operation_id':raw['operation_id'],'instance_id':raw.get('instance_id')})
+    except (DomainError,OSError):pass
+
 def wait_async(name,raw,client,cancel,deadline):
-    polls=0
+    """Wait for a task's job until its own lifetime ends, not a fixed poll count."""
+    started=time.monotonic();polls=0
     while isinstance(raw,dict) and raw.get('status') in ('queued','running'):
-        if cancel.is_set():raise DomainError('TASK_CANCELLED','Task cancelled by the user')
-        if time.monotonic()>=deadline:raise DomainError('TASK_EXPIRED','Task exceeded its lifetime')
+        if cancel.is_set():
+            cancel_job(name,raw,client);raise DomainError('TASK_CANCELLED','Task cancelled by the user')
+        if time.monotonic()>=deadline:
+            cancel_job(name,raw,client);raise DomainError('TASK_EXPIRED','Task exceeded its lifetime')
         if polls>=MAX_TASK_POLLS:raise DomainError('POLL_LIMIT','Task exceeded the polling limit')
-        time.sleep(.5);polls+=1
+        cancel.wait(min(poll_interval(time.monotonic()-started),max(0,deadline-time.monotonic())));polls+=1
+        if cancel.is_set():continue
         if name in ASYNC_ASSET:raw=client.call('assets.job',{'job_id':raw['job_id']})
-        elif raw.get('operation_id'):raw=client.call('blender.job',{'operation_id':raw['operation_id'],'instance_id':raw.get('instance_id')})
+        elif raw.get('operation_id'):
+            # Compact like a direct call; the raw runtime receipt carries internal fields.
+            raw=wait_and_compact(client,'blender.job',{'operation_id':raw['operation_id'],'instance_id':raw.get('instance_id'),
+                                                        'internal':True,'wait_seconds':0,'repeat_result':True})
         else:break
     return raw
 
-def tool_result(name,raw):
+IMAGE_SUFFIXES={'.png','.jpg','.jpeg','.webp'}
+MAX_IMAGE_BYTES=20*1024*1024
+# Agent clients cap one tool result at about 1 MiB (Codex turns anything larger into
+# truncated text), so full-size renders are sent as a smaller JPEG preview.
+MAX_INLINE_IMAGE_BYTES=700_000
+PREVIEW_SIDES=(1600,1280,1024,768)
+
+def shrink_image(data):
+    """JPEG preview under MAX_INLINE_IMAGE_BYTES, or None when Pillow is unavailable."""
+    try:
+        from io import BytesIO
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(BytesIO(data)) as source:
+            image=source.convert('RGB');size=image.size
+        for side in PREVIEW_SIDES:
+            for quality in (85,70):
+                preview=image.copy();preview.thumbnail((side,side))
+                out=BytesIO();preview.save(out,'JPEG',quality=quality)
+                if out.tell()<=MAX_INLINE_IMAGE_BYTES:return out.getvalue(),size,preview.size
+    except Exception:
+        return None
+    return None
+
+def inline_artifact_image(data,mime,structured):
+    """Content for an image artifact that fits in one agent tool result."""
+    if len(data)<=MAX_INLINE_IMAGE_BYTES:
+        return [{'type':'image','data':base64.b64encode(data).decode(),'mimeType':mime}]
+    shrunk=shrink_image(data)
+    if shrunk:
+        preview,(w,h),(pw,ph)=shrunk
+        structured['note']=f'Full image is {w}x{h} ({len(data):,} bytes); returned a {pw}x{ph} JPEG preview.'
+        return [{'type':'image','data':base64.b64encode(preview).decode(),'mimeType':'image/jpeg'}]
+    structured['note']=(f'Image is {len(data):,} bytes, too large to return to the agent. Inspect it with '
+                        'capture_focused_view or capture_viewport, or save a smaller JPEG copy and read that.')
+    return [{'type':'text','text':json.dumps(structured,ensure_ascii=False)}]
+
+def image_data(entry,root):
+    """Base64 for one image result entry.
+
+    Blender returns captures by file path so large renders never cross the
+    1 MiB runtime control channel. Only image files inside the runtime data
+    directory are read; inline data from older add-ons is still accepted.
+    """
+    if entry.get('data'):return entry['data']
+    path=entry.get('path') or entry.get('image_path')
+    if not isinstance(path,str) or root is None:return None
+    try:
+        file=Path(path).resolve()
+        if (not file.is_relative_to(Path(root).resolve()) or file.suffix.lower() not in IMAGE_SUFFIXES
+                or not file.is_file() or file.stat().st_size>MAX_IMAGE_BYTES):return None
+        return base64.b64encode(file.read_bytes()).decode()
+    except (OSError,ValueError):return None
+
+def tool_result(name,raw,root=None):
     structured=raw
-    if isinstance(raw,dict) and isinstance(raw.get('result'),dict) and raw['result'].get('images'):
-        images=raw['result']['images']
-        content=[{'type':'image','data':im['data'],'mimeType':im.get('mime_type','image/jpeg')}
-                 for im in images if isinstance(im,dict) and im.get('data')]
-        structured=dict(raw);structured['result']={k:v for k,v in raw['result'].items() if k!='images'}
+    result=raw.get('result') if isinstance(raw,dict) else None
+    if isinstance(result,dict) and (result.get('images') or result.get('image') or result.get('image_path')):
+        entries=(result['images'] if isinstance(result.get('images'),list) else
+                 [{'data':result.get('image'),'path':result.get('image_path'),'mime_type':result.get('mime_type','image/png')}])
+        content=[]
+        for entry in entries:
+            data=image_data(entry,root) if isinstance(entry,dict) else None
+            if data:content.append({'type':'image','data':data,'mimeType':entry.get('mime_type','image/jpeg')})
+        structured=dict(raw);structured['result']={k:v for k,v in result.items() if k not in ('images','image')}
         content.append({'type':'text','text':json.dumps(structured,ensure_ascii=False)})
-    elif isinstance(raw,dict) and isinstance(raw.get('result'),dict) and raw['result'].get('image'):
-        image=raw['result']['image'];mime=raw['result'].get('mime_type','image/png')
-        structured=dict(raw);structured['result']={k:v for k,v in raw['result'].items() if k!='image'}
-        content=[{'type':'image','data':image,'mimeType':mime},{'type':'text','text':json.dumps(structured,ensure_ascii=False)}]
     elif name == 'blendrelay_read_artifact':
         data=base64.b64decode(raw['data']);mime=raw['mime_type'];structured={k:v for k,v in raw.items() if k!='data'}
-        content=[{'type':'image','data':base64.b64encode(data).decode(),'mimeType':mime}] if mime.startswith('image/') else [{'type':'text','text':data.decode('utf-8')}]
+        content=inline_artifact_image(data,mime,structured) if mime.startswith('image/') else [{'type':'text','text':data.decode('utf-8')}]
     else:content=[{'type':'text','text':json.dumps(raw,ensure_ascii=False)}]
     failed=isinstance(raw,dict) and raw.get('status') in ('failed','interrupted','cancelled')
     validate(structured,TOOLS[name]['outputSchema'],path='structuredContent')
@@ -223,7 +330,7 @@ def call_tool(name,args,client,task_mode=False,cancel=None,deadline=None):
             chunks.append(base64.b64decode(raw['data']))
         raw=dict(raw,data=base64.b64encode(b''.join(chunks)).decode())
     if task_mode:raw=wait_async(name,raw,client,cancel,deadline)
-    return tool_result(name,raw)
+    return tool_result(name,raw,getattr(client,'root',None))
 
 def now():return datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
 def cleanup_tasks():
@@ -328,21 +435,75 @@ def error_code(error):
     if isinstance(error,json.JSONDecodeError):return -32700
     return -32603
 
+# Requests that can wait on Blender run on worker threads, so ping, tasks/get and
+# tasks/cancel are answered while a tool call or tasks/result is still waiting.
+BLOCKING_METHODS={'tools/call','tasks/result'};MAX_INFLIGHT=16;SHUTDOWN_GRACE=35
+OUTPUT_LOCK=threading.Lock();INFLIGHT=threading.BoundedSemaphore(MAX_INFLIGHT)
+
+def respond(message,client):
+    try:
+        result=handle(message,client)
+        if request_protocol(message)==LATEST_PROTOCOL and isinstance(result,dict):result.setdefault('_meta',{})['io.modelcontextprotocol/serverInfo']=SERVER_INFO
+        return {'jsonrpc':'2.0','id':message['id'],'result':result}
+    except Exception as error:
+        return {'jsonrpc':'2.0','id':message.get('id'),'error':{'code':error_code(error),'message':str(error)}}
+
+def write(response):
+    with OUTPUT_LOCK:print(json.dumps(response,ensure_ascii=True),flush=True)
+
+class RuntimeStarter:
+    """Start the runtime in the background so initialize and tools/list answer at once.
+
+    Agent CLIs list a server's tools only if it answers within a short startup
+    window; starting the runtime first used to take ~2 s and the tools vanished.
+    Requests that need Blender wait for the start to finish instead."""
+    def __init__(self,root,enabled=True):
+        self.root=root;self.ready=not enabled;self.lock=threading.Lock();self.thread=None
+        if enabled:
+            self.thread=threading.Thread(target=self._start,name='BlendRelay-runtime-start',daemon=True);self.thread.start()
+    def _start(self):
+        try:ensure_runtime(self.root);self.ready=True
+        except Exception:pass  # wait() retries and reports the failure on the first request that needs it
+    def wait(self):
+        if self.ready:return
+        self.thread.join(timeout=RUNTIME_START_TIMEOUT)
+        with self.lock:
+            if not self.ready:ensure_runtime(self.root);self.ready=True
+
+RUNTIME_START_TIMEOUT=15
+
+def respond_async(message,client,starter=None):
+    try:
+        if starter is not None:
+            try:starter.wait()
+            except Exception:pass  # the request itself then fails with the usual runtime-offline error
+        write(respond(message,client))
+    finally:INFLIGHT.release()
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--data-dir',default=str(data_dir()));parser.add_argument('--no-autostart',action='store_true');args=parser.parse_args()
-    if not args.no_autostart:ensure_runtime(args.data_dir)
+    starter=RuntimeStarter(args.data_dir,enabled=not args.no_autostart)
     client=Client(args.data_dir)
+    workers=[]
     for line in sys.stdin:
         message=None
         try:
             if len(line)>1024*1024:raise DomainError('INVALID_REQUEST','Input exceeds 1 MiB')
             message=json.loads(line);validate_envelope(message)
             if 'id' not in message:continue
-            result=handle(message,client)
-            if request_protocol(message)==LATEST_PROTOCOL and isinstance(result,dict):result.setdefault('_meta',{})['io.modelcontextprotocol/serverInfo']=SERVER_INFO
-            response={'jsonrpc':'2.0','id':message['id'],'result':result}
         except Exception as error:
-            response={'jsonrpc':'2.0','id':message.get('id') if isinstance(message,dict) else None,'error':{'code':error_code(error),'message':str(error)}}
-        print(json.dumps(response,ensure_ascii=True),flush=True)
+            write({'jsonrpc':'2.0','id':message.get('id') if isinstance(message,dict) else None,'error':{'code':error_code(error),'message':str(error)}})
+            continue
+        if message['method'] in BLOCKING_METHODS:
+            if not INFLIGHT.acquire(blocking=False):
+                write({'jsonrpc':'2.0','id':message['id'],'error':{'code':-32000,'message':f'Too many concurrent BlendRelay requests (limit {MAX_INFLIGHT})'}})
+                continue
+            worker=threading.Thread(target=respond_async,args=(message,client,starter),name='BlendRelay-MCP-request',daemon=True)
+            worker.start();workers=[w for w in workers if w.is_alive()]+[worker]
+        else:write(respond(message,client))
+    # Finish answers already in progress when the client closes stdin, within
+    # one overall limit (a tool call waits at most 30 s for Blender).
+    deadline=time.monotonic()+SHUTDOWN_GRACE
+    for worker in workers:worker.join(timeout=max(0,deadline-time.monotonic()))
 
 if __name__=='__main__':main()

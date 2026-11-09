@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import tempfile
+from pathlib import Path
 import unittest
 try:
     import bpy
@@ -38,6 +39,14 @@ class FocusedViewTests(unittest.TestCase):
         self.assertEqual(result['views'], [])
         self.assertTrue(result['scene_state_restored'])
 
+    def test_scale_factor_padding_becomes_margin(self):
+        self.assertAlmostEqual(focused_view.normalize_padding(1.25), 0.25)
+        self.assertAlmostEqual(focused_view.normalize_padding(0.15), 0.15)
+        self.assertEqual(focused_view.normalize_padding(-1), 0.0)
+        result = focused_view.capture(self.tmp.name, target_objects=['TestCube'], padding=1.25,
+                                      render_mode='workbench', max_dimension=128)
+        self.assertFalse(result.get('failed'), result)
+
     def test_empty_targets_raises_value_error(self):
         with self.assertRaises(ValueError):
             focused_view.capture(self.tmp.name, target_objects=[])
@@ -67,7 +76,8 @@ class FocusedViewTests(unittest.TestCase):
         self.assertTrue(view['fully_framed'])
         self.assertEqual(len(result['images']), 1)
         self.assertEqual(result['images'][0]['mime_type'], 'image/jpeg')
-        self.assertTrue(len(result['images'][0]['data']) > 0)
+        self.assertNotIn('data', result['images'][0])
+        self.assertGreater(Path(result['images'][0]['path']).stat().st_size, 0)
 
     def test_matrix_world_replay(self):
         first = focused_view.capture(
@@ -133,7 +143,6 @@ class FocusedViewTests(unittest.TestCase):
         self.assertTrue(result['scene_state_restored'])
 
     def test_cycles_max_dimension_capped_at_512(self):
-        from PIL import Image
         result = focused_view.capture(
             self.tmp.name,
             target_objects=['TestCube'],
@@ -143,9 +152,12 @@ class FocusedViewTests(unittest.TestCase):
         )
         self.assertFalse(result.get('failed', False))
         self.assertEqual(len(result['views']), 1)
-        img_path = result['views'][0]['image_path']
-        with Image.open(img_path) as img:
+        # Blender's bundled Python has no Pillow; read the size with bpy.
+        img = bpy.data.images.load(result['views'][0]['image_path'], check_existing=False)
+        try:
             self.assertLessEqual(max(img.size), 512)
+        finally:
+            bpy.data.images.remove(img)
         self.assertTrue(result['scene_state_restored'])
 
 

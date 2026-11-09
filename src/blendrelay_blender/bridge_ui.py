@@ -16,11 +16,12 @@ from bpy.props import BoolProperty, StringProperty, EnumProperty, IntProperty, F
 from .client import Connection,default_root
 from . import edit_context, workflow, run_metrics, conversation, agent_permissions
 from . import general, sketch, viewport_hud, target_region
-from . import asset_ui, claude_model_discovery, hud_preferences
+from . import asset_ui, claude_model_discovery, hud_preferences, agent_preferences
+from .transport import IMAGE_PATHS_FEATURE, bounded_ack, inline_images
 
-STATE=dict(connection=None,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
+STATE=dict(connection=None,online=False,instance=uuid.uuid4().hex,status='Disconnected',last_poll=0,versions=[],ack=None,root=None,
            codex_process=None,codex_output=None,codex_log=None,codex_started=0,
-           agent_process=None,agent_output=None,agent_log=None,agent_backend='ANTIGRAVITY',agent_model='',agent_started=0,
+           agent_process=None,agent_output=None,agent_log=None,agent_backend='CODEX',agent_model='',agent_started=0,
            active_agent_run_id=None,agent_job_errors=[],agent_expected_edit=False,agent_successful_edits=0,workspace_id=None,
            agent_verify_after=False,agent_is_verification=False,agent_original_request='')
 
@@ -217,6 +218,16 @@ def discover_claude_models(executable=None):
     _MODEL_ITEMS['CLAUDE'] = _enum_items('Claude', models)
     STATE['claude_model_status'] = ''
     return len(models)
+
+
+def ensure_model_item(agent, model_id):
+    """Make a model saved in Blender's settings selectable before its list is refreshed."""
+    items = _MODEL_ITEMS[agent]
+    if model_id in (MODEL_DEFAULT, MODEL_CUSTOM) or any(item[0] == model_id for item in items):
+        return
+    known = [(item[0], item[1], item[2]) for item in items if item[0] not in (MODEL_DEFAULT, MODEL_CUSTOM)]
+    label = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude'}[agent]
+    _MODEL_ITEMS[agent] = _enum_items(label, known + [(model_id, model_id, f'Saved {label} model: {model_id}')])
 
 
 def model_items_antigravity(self, context):
@@ -442,6 +453,7 @@ def ensure_connected(context=None):
         return True
     except Exception as e:
         STATE['status'] = f'Connecting to runtime failed: {e}'
+        set_online(False)
         return False
 
 
@@ -565,8 +577,10 @@ def log_agent_stream(line, agent_name, log_file, collected_text):
                 cost = data.get('total_cost_usd')
                 cost_text = f' · ${cost:.4f}' if isinstance(cost, (int, float)) else ''
                 print(f"\n[Claude] Finished ({subtype}{cost_text})", flush=True)
-                if not collected_text and data.get('result'):
-                    collected_text.append(str(data['result']))
+                # The result is Claude's final answer; streamed text also contains
+                # progress notes from earlier turns, glued together without breaks.
+                if data.get('result'):
+                    collected_text[:] = [str(data['result'])]
                 return
             return
         except (ValueError, TypeError):
@@ -625,10 +639,10 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
     disable_windows_quickedit()
     active_proc = STATE.get('agent_process') or STATE.get('codex_process')
     if active_proc and active_proc.poll() is None:
-        agent_name = agent_display_name(STATE.get('agent_backend', 'ANTIGRAVITY'))
+        agent_name = agent_display_name(STATE.get('agent_backend', 'CODEX'))
         raise RuntimeError(f'An {agent_name} prompt is already running. Click Cancel Running Task or wait for it to finish.')
     prompt = (prompt_override or context.scene.blendrelay_codex_prompt).strip()
-    agent = getattr(context.scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
+    agent = getattr(context.scene, 'blendrelay_agent_backend', agent_preferences.DEFAULT_AGENT)
     agent_name = agent_display_name(agent)
     if not prompt:
         raise RuntimeError(f'Enter a prompt for {agent_name}')
@@ -1019,7 +1033,7 @@ def check_agent():
     output_path = STATE.get('agent_output') or STATE.get('codex_output')
     output = Path(output_path) if output_path else None
     message = output.read_text(encoding='utf-8', errors='replace').strip() if output and output.exists() else ''
-    agent_name = agent_display_name(STATE.get('agent_backend', 'ANTIGRAVITY'))
+    agent_name = agent_display_name(STATE.get('agent_backend', 'CODEX'))
     log_path = STATE.get('agent_log') or STATE.get('codex_log')
     log_text = Path(log_path).read_text(encoding='utf-8', errors='replace') if log_path and Path(log_path).exists() else ''
     failure = agent_permissions.agent_failure(
@@ -1087,10 +1101,23 @@ def check_agent():
 check_codex = check_agent
 
 
+ACK_MAX_ATTEMPTS = 5
+
+
+def set_online(online):
+    """Track whether the runtime actually answered, so the panel does not flash
+    "Connected" for every reconnect attempt while the runtime is offline."""
+    if STATE.get('online') != online:
+        STATE['online'] = online
+        redraw()
+
+
 def received(response):
     if 'error' in response:
         print(f"[BlendRelay Bridge] ❌ Error from runtime: {response['error']['message']}", flush=True)
         raise RuntimeError(response['error']['message'])
+    STATE['runtime_features'] = response['result'].get('features') or []
+    set_online(True)
     job = response['result'].get('command')
     STATE['status'] = 'Connected · general Blender mode'
     if job:
@@ -1121,7 +1148,10 @@ def received(response):
                     {'action': action, 'operation_id': op_id, 'error': error}
                 )
             print(f"[BlendRelay Bridge] ❌ Exception in job '{action}': {e}", flush=True)
-        STATE['ack'] = dict(instance_id=STATE['instance'], operation_id=job['operation_id'], result=result, error=error)
+        if IMAGE_PATHS_FEATURE not in STATE.get('runtime_features', ()):
+            result = inline_images(result)  # older runtime/gateway reads embedded images only
+        STATE['ack'] = bounded_ack(dict(instance_id=STATE['instance'], operation_id=job['operation_id'], result=result, error=error))
+        STATE['ack_attempts'] = 0
         STATE['status'] = 'Edit failed · inspect version history' if error else 'Connected · operation finished'
         refresh_versions()
     redraw()
@@ -1139,16 +1169,22 @@ def timer():
             c.tick()
             if not c.pending and STATE['ack']:
                 payload=STATE['ack']
-                def acknowledged(response):
-                    if 'error' in response:raise RuntimeError(response['error']['message'])
-                    STATE['ack']=None
-                c.request('blender.ack',payload,acknowledged)
+                STATE['ack_attempts']=STATE.get('ack_attempts',0)+1
+                if STATE['ack_attempts']>ACK_MAX_ATTEMPTS:
+                    # Never let one undeliverable result block all future jobs.
+                    print(f"[BlendRelay Bridge] Dropping undeliverable result for {payload.get('operation_id')}", flush=True)
+                    STATE['ack']=None;STATE['ack_attempts']=0
+                else:
+                    def acknowledged(response):
+                        if 'error' in response:raise RuntimeError(response['error']['message'])
+                        STATE['ack']=None;STATE['ack_attempts']=0
+                    c.request('blender.ack',payload,acknowledged)
             elif not c.pending and time.monotonic()-STATE['last_poll']>.35:
                 STATE['last_poll']=time.monotonic()
                 c.request('blender.poll',dict(instance_id=STATE['instance'],scene_name=bpy.context.scene.name,
                           filepath=bpy.data.filepath,selection=[o.name for o in bpy.context.selected_objects],**asset_ui.poll_fields(bpy.context.scene)),received)
         except Exception as e:
-            c.close();STATE['connection']=None;STATE['status']=str(e);redraw()
+            c.close();STATE['connection']=None;STATE['status']=str(e);set_online(False);redraw()
     else:
         if time.monotonic() - STATE['last_poll'] > 3.0:
             STATE['last_poll'] = time.monotonic()
@@ -1170,7 +1206,7 @@ class BR_OT_Disconnect(bpy.types.Operator):
     bl_idname='blendrelay.disconnect';bl_label='Disconnect'
     def execute(self,context):
         if STATE['connection']:STATE['connection'].close()
-        STATE['connection']=None;STATE['status']='Disconnected';return {'FINISHED'}
+        STATE['connection']=None;STATE['status']='Disconnected';set_online(False);return {'FINISHED'}
 
 
 class BR_OT_Checkpoint(bpy.types.Operator):
@@ -1618,14 +1654,14 @@ class BR_PT_Main(bpy.types.Panel):
         header_row.label(text='v' + addon_version if addon_version else 'v')
 
         conn_row = layout.row(align=True)
-        conn = STATE.get('connection')
-        if conn:
+        if STATE.get('connection') and STATE.get('online'):
             conn_row.label(text='Connected', icon='CHECKMARK')
             conn_row.operator('blendrelay.refresh', text='', icon='FILE_REFRESH')
             conn_row.operator('blendrelay.disconnect', text='', icon='X')
         else:
-            conn_row.alert = True
-            conn_row.label(text='Disconnected', icon='ERROR')
+            # One steady state while reconnect attempts run every few seconds;
+            # the runtime starts with the next agent run or the Connect button.
+            conn_row.label(text='Waiting for runtime…', icon='TIME')
             conn_row.operator('blendrelay.refresh', text='Connect', icon='PLAY')
         if hasattr(bpy.ops.wm, 'console_toggle'):
             conn_row.operator('wm.console_toggle', text='', icon='CONSOLE')
@@ -1641,7 +1677,7 @@ class BR_PT_Main(bpy.types.Panel):
 
         # ── TAB: GENERATE ───────────────────────────────────────────────────
         if tab == 'GENERATE':
-            agent = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
+            agent = getattr(scene, 'blendrelay_agent_backend', agent_preferences.DEFAULT_AGENT)
             agent_name = agent_display_name(agent)
 
             # Active Task Running Banner
@@ -1803,7 +1839,7 @@ class BR_PT_Main(bpy.types.Panel):
             b_row.prop(scene, 'blendrelay_agent_backend', expand=True)
             b_row.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
 
-            agent = getattr(scene, 'blendrelay_agent_backend', 'ANTIGRAVITY')
+            agent = getattr(scene, 'blendrelay_agent_backend', agent_preferences.DEFAULT_AGENT)
 
             col = settings_box.column()
             col.use_property_split = True
@@ -1984,51 +2020,61 @@ def register():
             ('CODEX', 'Codex', 'Run OpenAI Codex CLI to edit the Blender scene'),
             ('CLAUDE', 'Claude', 'Run Anthropic Claude Code to edit the Blender scene'),
         ],
-        default='ANTIGRAVITY',
+        default=agent_preferences.DEFAULT_AGENT,
+        update=agent_preferences.changed,
     )
     discover_codex_models()
     bpy.types.Scene.blendrelay_antigravity_model = EnumProperty(
+        update=agent_preferences.changed,
         name='Antigravity model',
         description='Models reported by Antigravity; refresh after signing in',
         items=model_items_antigravity,
     )
     bpy.types.Scene.blendrelay_antigravity_model_custom = StringProperty(
+        update=agent_preferences.changed,
         name='Custom model',
         default='',
         description='Custom Antigravity model identifier',
     )
     bpy.types.Scene.blendrelay_antigravity_path = StringProperty(
+        update=agent_preferences.changed,
         name='Antigravity executable',
         subtype='FILE_PATH',
         default=default_antigravity_path(),
     )
 
     bpy.types.Scene.blendrelay_codex_model = EnumProperty(
+        update=agent_preferences.changed,
         name='Codex model',
         description='Models available in the current Codex account cache',
         items=model_items_codex,
     )
     bpy.types.Scene.blendrelay_codex_model_custom = StringProperty(
+        update=agent_preferences.changed,
         name='Custom model',
         default='',
         description='Custom Codex model identifier passed with --model',
     )
     bpy.types.Scene.blendrelay_codex_path = StringProperty(
+        update=agent_preferences.changed,
         name='Codex executable',
         subtype='FILE_PATH',
         default=default_codex_path(),
     )
     bpy.types.Scene.blendrelay_claude_model = EnumProperty(
+        update=agent_preferences.changed,
         name='Claude model',
         description='Choose a model reported by Claude Code, use its default, or enter a custom model',
         items=model_items_claude,
     )
     bpy.types.Scene.blendrelay_claude_model_custom = StringProperty(
+        update=agent_preferences.changed,
         name='Custom model',
         default='',
         description='Claude model alias or full identifier passed with --model',
     )
     bpy.types.Scene.blendrelay_claude_path = StringProperty(
+        update=agent_preferences.changed,
         name='Claude executable',
         subtype='FILE_PATH',
         default=default_claude_path(),
@@ -2094,6 +2140,7 @@ def register():
     )
 
     hud_preferences.register()
+    agent_preferences.register(prepare_model=ensure_model_item)
     sketch.register_overlay()
     viewport_hud.register_hud()
     refresh_models_async()
@@ -2102,6 +2149,7 @@ def register():
 
 def unregister():
     hud_preferences.unregister()
+    agent_preferences.unregister()
     asset_ui.unregister()
     if bpy.app.timers.is_registered(timer):
         bpy.app.timers.unregister(timer)
