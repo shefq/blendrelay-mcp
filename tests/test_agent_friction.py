@@ -1,6 +1,7 @@
 """Regression tests for two failures agents hit in real spray-bottle runs."""
 import base64
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 
@@ -184,11 +185,25 @@ class OperationIdReuseTests(unittest.TestCase):
 
 
 class RuntimeLaunchTests(unittest.TestCase):
+    # Mock only the module's platform view. Mutating os.name also changes
+    # pathlib globally and makes Linux try to instantiate WindowsPath.
+    def test_posix_launch_keeps_native_paths_and_skips_windows_launcher(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(server, 'Client') as client_cls, \
+                mock.patch.object(server, 'os', SimpleNamespace(name='posix')), \
+                mock.patch.object(server, '_start_outside_job') as outside, \
+                mock.patch.object(server.subprocess, 'Popen') as popen:
+            client_cls.return_value.call.side_effect = [OSError('offline'), {'ok': True}]
+            server.ensure_runtime(tmp)
+        outside.assert_not_called()
+        popen.assert_called_once()
+
     def test_windows_prefers_launch_outside_agent_job(self):
         from unittest import mock
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(server, 'Client') as client_cls, \
-                mock.patch.object(server.os, 'name', 'nt'), \
+                mock.patch.object(server, 'os', SimpleNamespace(name='nt')), \
                 mock.patch.object(server, '_start_outside_job', return_value=True) as outside, \
                 mock.patch.object(server.subprocess, 'Popen') as popen:
             client_cls.return_value.call.side_effect = [OSError('offline'), {'ok': True}]
@@ -200,7 +215,7 @@ class RuntimeLaunchTests(unittest.TestCase):
         from unittest import mock
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(server, 'Client') as client_cls, \
-                mock.patch.object(server.os, 'name', 'nt'), \
+                mock.patch.object(server, 'os', SimpleNamespace(name='nt')), \
                 mock.patch.object(server, '_start_outside_job', return_value=False), \
                 mock.patch.object(server.subprocess, 'Popen') as popen:
             client_cls.return_value.call.side_effect = [OSError('offline'), {'ok': True}]
