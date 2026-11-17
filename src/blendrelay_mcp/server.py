@@ -38,13 +38,16 @@ CONTROL={'operation_id':ID,'instance_id':ID,'wait_seconds':{'type':'number','min
 JOB_OUTPUT=obj({'operation_id':ID,'instance_id':ID,'action':STR,
     'status':{'enum':['queued','running','complete','failed','interrupted','cancelled']},
     'error':{},'result':{},'unchanged':BOOL,'next_step':STR},('operation_id','status'))
-SESSION_OUTPUT={'type':'array','items':obj({'instance_id':ID,'scene_name':STR,'filepath':STR,
+# MCP requires a tool's outputSchema and structuredContent to be JSON objects, so the
+# session list is returned as {"sessions": [...]} (strict clients reject an array).
+SESSION_ITEM=obj({'instance_id':ID,'scene_name':STR,'filepath':STR,
     'selection':{'type':'array','items':STR},'version':STR,'workspace_id':{},'asset_policy':{},'asset_scene':{},
     'allow_python_execution':BOOL,'agent_run_id':{},'mcp_call_limit':{'type':'integer'},
     'edit_attempt_limit':{'type':'integer'},'job_poll_limit':{'type':'integer'},
     'max_mcp_calls':{'type':'integer'},'max_edit_attempts':{'type':'integer'},'auto_extend':BOOL,
     'mcp_calls':{'type':'integer'},'edit_attempts':{'type':'integer'},'job_polls':{'type':'integer'},
-    'poll_counts':{'type':'object'}},('instance_id',))}
+    'poll_counts':{'type':'object'}},('instance_id',))
+SESSION_OUTPUT=obj({'sessions':{'type':'array','items':SESSION_ITEM}},('sessions',))
 ASSET_JOB_OUTPUT=obj({'job_id':ID,'status':{'enum':['running','complete','failed','queued','interrupted','cancelled']},
     'created_at':NUM,'instance_id':ID,'result':{},'error':{}},('job_id','status'))
 POLICY_OUTPUT=obj({'poly_haven':BOOL,'poly_pizza':BOOL,'pizza_cc0':BOOL,'pizza_cc_by':BOOL,
@@ -288,6 +291,7 @@ def image_data(entry,root):
     except (OSError,ValueError):return None
 
 def tool_result(name,raw,root=None):
+    if name=='blendrelay_blender_sessions' and isinstance(raw,list):raw={'sessions':raw}
     structured=raw
     result=raw.get('result') if isinstance(raw,dict) else None
     if isinstance(result,dict) and (result.get('images') or result.get('image') or result.get('image_path')):
