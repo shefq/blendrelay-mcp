@@ -48,5 +48,40 @@ class SessionsResultTests(unittest.TestCase):
         self.assertEqual(self.call([])['structuredContent'], {'sessions': []})
 
 
+class StdioInputTests(unittest.TestCase):
+    """Running the server by hand in a terminal must not answer blank lines with errors."""
+
+    def run_gateway(self, text):
+        import os, subprocess, sys, tempfile
+        from pathlib import Path
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / 'src'))
+        with tempfile.TemporaryDirectory() as tmp:
+            return subprocess.run([sys.executable, '-m', 'blendrelay_mcp.server', '--data-dir', tmp, '--no-autostart'],
+                                  input=text, capture_output=True, text=True, timeout=15, env=env)
+
+    def test_blank_lines_are_ignored(self):
+        ping = json.dumps({'jsonrpc': '2.0', 'id': 7, 'method': 'ping'})
+        result = self.run_gateway('\n \n\t\n' + ping + '\n\n')
+        responses = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(responses, [{'jsonrpc': '2.0', 'id': 7, 'result': {}}])
+
+    def test_invalid_json_still_gets_a_parse_error(self):
+        result = self.run_gateway('not json\n')
+        self.assertEqual(json.loads(result.stdout)['error']['code'], -32700)
+
+    def test_no_terminal_hint_when_driven_by_a_client(self):
+        # Piped stdin (how MCP clients run the server) never prints the hint.
+        self.assertNotIn('waiting for an MCP client', self.run_gateway('').stderr)
+
+    def test_terminal_detection(self):
+        class Tty:
+            def isatty(self): return True
+        class Broken:
+            def isatty(self): raise ValueError('closed')
+        self.assertTrue(server.interactive(Tty()))
+        self.assertFalse(server.interactive(Broken()))
+        self.assertFalse(server.interactive(object()))
+
+
 if __name__ == '__main__':
     unittest.main()

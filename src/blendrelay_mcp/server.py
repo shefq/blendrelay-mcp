@@ -484,12 +484,24 @@ def respond_async(message,client,starter=None):
         write(respond(message,client))
     finally:INFLIGHT.release()
 
+TERMINAL_HINT=('BlendRelay MCP server is running and waiting for an MCP client on stdin.\n'
+               'Add it to your agent (see the README), or run "blendrelay-mcp doctor" to check your setup.\n'
+               'Press Ctrl+C to exit.')
+
+def interactive(stream):
+    try:return stream.isatty()
+    except (AttributeError,ValueError,OSError):return False
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--data-dir',default=str(data_dir()));parser.add_argument('--no-autostart',action='store_true');args=parser.parse_args()
+    # Started by hand in a terminal rather than by an MCP client: say so on stderr
+    # (stdout stays reserved for JSON-RPC).
+    if interactive(sys.stdin):print(TERMINAL_HINT,file=sys.stderr,flush=True)
     starter=RuntimeStarter(args.data_dir,enabled=not args.no_autostart)
     client=Client(args.data_dir)
     workers=[]
     for line in sys.stdin:
+        if not line.strip():continue  # blank lines (e.g. Enter in a terminal) carry no message
         message=None
         try:
             if len(line)>1024*1024:raise DomainError('INVALID_REQUEST','Input exceeds 1 MiB')
