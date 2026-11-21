@@ -77,6 +77,13 @@ class AgentPreferencesTests(unittest.TestCase):
         finally:
             prefs._applying = False
 
+    def test_model_rejected_by_prepare_falls_back_to_cli_default(self):
+        scene = self.scene(blendrelay_codex_model='gpt-6.1-sol')
+        prefs._prepare_model = lambda agent, model: not (agent == 'CODEX' and model == 'gpt-6.2-sol')
+        prefs.apply({'blendrelay_codex_model': 'gpt-6.2-sol', 'blendrelay_claude_model': 'claude-opus-5-5'}, [scene])
+        self.assertEqual(scene.blendrelay_codex_model, prefs.MODEL_DEFAULT)
+        self.assertEqual(scene.blendrelay_claude_model, 'claude-opus-5-5')
+
     def test_unavailable_model_keeps_the_scene_value(self):
         class Strict(SimpleNamespace):
             def __setattr__(self, name, value):

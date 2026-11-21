@@ -176,7 +176,66 @@ def _enum_items(agent, models):
     return items
 
 
-def discover_codex_models():
+_CODEX_OFFERED = set()  # model ids in Codex's own list; empty when unknown
+# 'live' when the list came from the configured Codex binary itself (`codex debug
+# models`), 'cache' when it came from ~/.codex/models_cache.json. The cache is shared
+# by every Codex install (e.g. the desktop app), so it can list models that an older
+# CLI cannot use.
+_CODEX_SOURCE = 'cache'
+CODEX_MODELS_TIMEOUT = 20
+
+
+def codex_model_unavailable(model_id):
+    """True when Codex's current model list is known and does not offer this model."""
+    return (bool(_CODEX_OFFERED) and model_id not in (MODEL_DEFAULT, MODEL_CUSTOM)
+            and model_id not in _CODEX_OFFERED)
+
+
+def unavailable_model_notice(model_id):
+    return (f'Codex model {model_id} is not available to this Codex CLI and account; using CLI default. '
+            'Update Codex (codex update) or pick another model in Settings.')
+
+
+def _codex_entries(data):
+    models = []
+    for entry in data.get('models', []) if isinstance(data, dict) else []:
+        if not isinstance(entry, dict) or entry.get('visibility') == 'hide':
+            continue
+        model_id = str(entry.get('slug', '')).strip()
+        if model_id:
+            models.append((model_id, entry.get('display_name') or model_id,
+                           entry.get('description') or f'Codex model: {model_id}'))
+    return models
+
+
+def query_codex_models(executable):
+    """Ask this Codex binary for the models it can use with the signed-in account."""
+    completed = subprocess.run(
+        [str(executable), 'debug', 'models'], capture_output=True, text=True, encoding='utf-8',
+        errors='replace', timeout=CODEX_MODELS_TIMEOUT, stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+    )
+    if completed.returncode:
+        raise RuntimeError(f'codex debug models exited with code {completed.returncode}')
+    models = _codex_entries(json.loads(completed.stdout))
+    if not models:
+        raise RuntimeError('codex debug models returned no models')
+    return models
+
+
+def discover_codex_models(executable=None):
+    """Load Codex models: from the binary itself when given, else from the shared cache."""
+    global _CODEX_OFFERED, _CODEX_SOURCE
+    if executable:
+        try:
+            models = query_codex_models(executable)
+        except Exception as error:  # older CLI without `debug models`, offline, timeout ...
+            print(f'[BlendRelay] Could not ask Codex for its models ({error}); using the model cache.', flush=True)
+        else:
+            _MODEL_ITEMS['CODEX'] = _enum_items('Codex', models)
+            _CODEX_OFFERED = {model_id for model_id, _name, _description in models}
+            _CODEX_SOURCE = 'live'
+            return len(models)
     models = []
     cache_path = Path.home() / '.codex' / 'models_cache.json'
     if cache_path.is_file():
@@ -192,6 +251,8 @@ def discover_codex_models():
         except Exception as error:
             STATE['model_status'] = f'Could not read Codex model cache: {error}'
     _MODEL_ITEMS['CODEX'] = _enum_items('Codex', models)
+    _CODEX_OFFERED = {model_id for model_id, _name, _description in models}
+    _CODEX_SOURCE = 'cache'
     return len(models)
 
 
@@ -235,13 +296,24 @@ def discover_claude_models(executable=None):
 
 
 def ensure_model_item(agent, model_id):
-    """Make a model saved in Blender's settings selectable before its list is refreshed."""
+    """Make a model saved in Blender's settings selectable before its list is refreshed.
+
+    Returns False when the model must not be restored: Codex's list is loaded at
+    startup, so a saved Codex model it no longer offers falls back to CLI default.
+    Claude and Antigravity lists are only known after a refresh, so their saved
+    models are kept selectable.
+    """
+    if agent == 'CODEX' and codex_model_unavailable(model_id):
+        STATE['model_status'] = unavailable_model_notice(model_id)
+        print('[BlendRelay]', STATE['model_status'], flush=True)
+        return False
     items = _MODEL_ITEMS[agent]
     if model_id in (MODEL_DEFAULT, MODEL_CUSTOM) or any(item[0] == model_id for item in items):
-        return
+        return True
     known = [(item[0], item[1], item[2]) for item in items if item[0] not in (MODEL_DEFAULT, MODEL_CUSTOM)]
     label = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude'}[agent]
     _MODEL_ITEMS[agent] = _enum_items(label, known + [(model_id, model_id, f'Saved {label} model: {model_id}')])
+    return True
 
 
 def model_items_antigravity(self, context):
@@ -275,13 +347,17 @@ def refresh_models_async():
     scene = getattr(bpy.context, 'scene', None)
     claude_executable = (getattr(scene, 'blendrelay_claude_path', '').strip()
                          or default_claude_path())
+    codex_executable = (getattr(scene, 'blendrelay_codex_path', '').strip()
+                        or default_codex_path())
     if not _MODEL_REFRESH_LOCK.acquire(blocking=False):
         return
 
     def worker():
         try:
+            # Codex first: its real list decides whether the saved Codex model is usable.
+            codex_count = discover_codex_models(codex_executable)
+            STATE['revalidate_models'] = True  # applied by timer() on Blender's main thread
             claude_count = discover_claude_models(claude_executable)
-            codex_count = discover_codex_models()
             antigravity_count = discover_antigravity_models()
             status = (f'{codex_count} Codex, {antigravity_count} Antigravity and '
                       f'{claude_count} Claude models found')
@@ -713,7 +789,21 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
         executable = Path(exe_str)
         if not executable.is_file() and not shutil.which(str(executable)):
             raise RuntimeError(f'Codex executable not found at: {executable}. Set its path in the BlendRelay panel.')
+        # The list from this Codex binary (fetched when Blender opened or on Refresh) is
+        # authoritative; without it, re-read the cache so a withdrawn model is caught.
+        if _CODEX_SOURCE != 'live':
+            discover_codex_models()
+        choice = getattr(context.scene, 'blendrelay_codex_model', MODEL_DEFAULT)
+        if codex_model_unavailable(choice):
+            STATE['model_status'] = unavailable_model_notice(choice)
+            print('[BlendRelay]', STATE['model_status'], flush=True)
+            try:
+                context.scene.blendrelay_codex_model = MODEL_DEFAULT  # saved for every file
+            except (TypeError, ValueError):
+                pass
         model = selected_model(context.scene, agent)
+        if codex_model_unavailable(model):
+            model = ''
     else:
         exe_str = getattr(context.scene, 'blendrelay_claude_path', '').strip() or default_claude_path()
         resolved = shutil.which(exe_str)
@@ -1182,6 +1272,8 @@ def received(response):
 
 
 def timer():
+    if STATE.pop('revalidate_models', False):
+        agent_preferences.revalidate()
     if STATE.get('need_redraw'):
         STATE['need_redraw'] = False
         redraw()
@@ -1330,7 +1422,7 @@ class BR_OT_CancelAgent(bpy.types.Operator):
 class BR_OT_RefreshModels(bpy.types.Operator):
     bl_idname = 'blendrelay.refresh_models'
     bl_label = 'Refresh available models'
-    bl_description = 'Reload models exposed by the selected CLI and the Codex local cache'
+    bl_description = 'Reload the models each agent CLI can use with your account'
 
     def execute(self, context):
         refresh_models_async()

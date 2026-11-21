@@ -97,8 +97,8 @@ def apply(values, scenes):
     try:
         for scene in scenes:
             for name, value in values.items():
-                if name in MODEL_FIELDS and _prepare_model:
-                    _prepare_model(MODEL_FIELDS[name], value)
+                if name in MODEL_FIELDS and _prepare_model and _prepare_model(MODEL_FIELDS[name], value) is False:
+                    value = MODEL_DEFAULT  # e.g. a Codex model no longer offered
                 try:
                     if getattr(scene, name, None) != value:
                         setattr(scene, name, value)
@@ -112,6 +112,18 @@ def apply(values, scenes):
 def restore(_unused=None):
     flush()
     apply(load(), list(bpy.data.scenes))
+
+
+def revalidate():
+    """Re-apply the saved settings once model lists are refreshed (runs on Blender's main thread).
+
+    A saved model the refreshed list no longer offers falls back to CLI default; the
+    saved choice itself is kept, so it returns if the model becomes available again.
+    """
+    if hasattr(bpy.data, 'scenes'):
+        flush()
+        apply(load(), list(bpy.data.scenes))
+    return None
 
 
 @persistent
@@ -141,8 +153,9 @@ def register(prepare_model=None):
 
 def unregister():
     global _prepare_model
-    if bpy.app.timers.is_registered(restore_when_ready):
-        bpy.app.timers.unregister(restore_when_ready)
+    for pending in (restore_when_ready, revalidate):
+        if bpy.app.timers.is_registered(pending):
+            bpy.app.timers.unregister(pending)
     flush()
     if bpy.app.timers.is_registered(flush):
         bpy.app.timers.unregister(flush)
