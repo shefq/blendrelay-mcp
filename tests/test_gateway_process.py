@@ -22,7 +22,9 @@ class GatewayProcessTests(unittest.TestCase):
                 result = subprocess.run(
                     [sys.executable, '-m', 'blendrelay_mcp.server', '--data-dir', tmp],
                     input='\n'.join(json.dumps(m) for m in messages) + '\n',
-                    capture_output=True, text=True, timeout=15, env=env,
+                    # On Windows the runtime is launched through PowerShell/WMI so it outlives
+                    # agent runs; that can take well over 15 s on a busy CI runner.
+                    capture_output=True, text=True, timeout=60, env=env,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 responses = [json.loads(line) for line in result.stdout.splitlines()]
