@@ -489,9 +489,12 @@ def _submit_agent_prompt(context):
 
 
 def has_console_toggle():
-    """Return True only when Blender's Windows-only console toggle operator is registered."""
-    if not hasattr(bpy.types, 'WM_OT_console_toggle'):
-        return False
+    """True only where Blender registers the system-console operator (Windows builds).
+
+    hasattr(bpy.ops.wm, ...) is always True because bpy.ops returns a proxy for any
+    name, and built-in operators are not listed in bpy.types. get_rna_type() raises
+    KeyError when the operator is not registered, so it is reliable on every platform.
+    """
     try:
         bpy.ops.wm.console_toggle.get_rna_type()
         return True

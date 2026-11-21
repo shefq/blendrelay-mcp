@@ -114,14 +114,14 @@ def default_antigravity_path():
 
 
 def default_codex_path():
+    # On Windows prefer the Codex app's own CLI over any codex on PATH (e.g. an npm shim).
+    if sys.platform == 'win32':
+        app = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'OpenAI' / 'Codex' / 'bin' / 'codex.exe'
+        if app.is_file():
+            return str(app)
     which_codex = shutil.which('codex')
     if which_codex:
         return which_codex
-    if sys.platform == 'win32':
-        p = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'OpenAI' / 'Codex' / 'bin' / 'codex.exe'
-        if p.is_file():
-            return str(p)
-        return r'C:\Users\mshef\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe'
     for candidate in (Path.home() / '.local' / 'bin' / 'codex', Path('/usr/local/bin/codex')):
         if candidate.is_file():
             return str(candidate)
