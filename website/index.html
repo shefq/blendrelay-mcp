@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BlendRelay MCP — Open-Source Blender AI Add-on and MCP Server</title>
   <meta name="description" content="Create, edit, rig and animate Blender scenes with AI prompts, selected objects, reference images and viewport sketches using the open-source BlendRelay MCP.">
-  <link rel="canonical" href="https://shefq.github.io/blendrelay-mcp/">
+  <link rel="canonical" href="https://shefq.github.io/blendrelay-mcp/"><meta property="og:type" content="website"><meta property="og:site_name" content="BlendRelay MCP"><meta property="og:title" content="BlendRelay MCP — Open-Source Blender AI Add-on and MCP Server"><meta property="og:description" content="Create, edit, rig and animate Blender scenes with AI prompts, selected objects, reference images and viewport sketches using the open-source BlendRelay MCP."><meta property="og:url" content="https://shefq.github.io/blendrelay-mcp/"><meta property="og:image" content="https://shefq.github.io/blendrelay-mcp/assets/social-card.jpg"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:alt" content="BlendRelay MCP: create, edit, rig and animate Blender scenes with AI"><meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="/blendrelay-mcp/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/blendrelay-mcp/assets/site.css">
   <script type="application/ld+json">
   {"@context":"https://schema.org","@graph":[
     {"@type":"WebSite","name":"BlendRelay MCP","url":"https://shefq.github.io/blendrelay-mcp/"},
-    {"@type":"SoftwareApplication","name":"BlendRelay MCP","applicationCategory":"MultimediaApplication","operatingSystem":"Blender 4.5+","description":"Open-source Blender AI add-on and MCP server for prompt-based 3D creation, editing, rigging and animation.","url":"https://shefq.github.io/blendrelay-mcp/","downloadUrl":"https://pypi.org/project/blendrelay-mcp/","codeRepository":"https://github.com/shefq/blendrelay-mcp","license":"https://github.com/shefq/blendrelay-mcp/blob/main/LICENSE","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
+    {"@type":"SoftwareApplication","name":"BlendRelay MCP","applicationCategory":"MultimediaApplication","operatingSystem":"Windows, macOS, Linux","softwareRequirements":"Blender 4.5 or newer","releaseNotes":"https://github.com/shefq/blendrelay-mcp/releases","description":"Open-source Blender AI add-on and MCP server for prompt-based 3D creation, editing, rigging and animation.","url":"https://shefq.github.io/blendrelay-mcp/","downloadUrl":"https://pypi.org/project/blendrelay-mcp/","codeRepository":"https://github.com/shefq/blendrelay-mcp","license":"https://github.com/shefq/blendrelay-mcp/blob/main/LICENSE","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}
   ]}
   </script>
 </head>
@@ -29,9 +29,10 @@
         <p class="lede">BlendRelay MCP connects Blender to supported AI agents. Generate complete scenes, modify selected objects and geometry, guide changes with images or viewport sketches, then keep working with normal Blender data.</p>
         <div class="button-row"><a class="button" href="/blendrelay-mcp/install/">Install BlendRelay</a><a class="button secondary" href="/blendrelay-mcp/examples/dragon-city/">See the dragon-city workflow</a></div>
         <p class="status"><span class="dot" aria-hidden="true"></span>Open source · Blender 4.5+ · Published on PyPI</p>
+        <p class="os-note">Runs on Windows, macOS and Linux. <a href="/blendrelay-mcp/install/#update">Updating?</a> · <a href="https://github.com/shefq/blendrelay-mcp/releases">Release notes</a></p>
       </div>
       <div class="hero-media">
-        <figure class="workflow-shot hero-shot"><img src="/blendrelay-mcp/assets/media/hero-dragon-city.webp" width="2048" height="1190" alt="Cinematic Blender city rooftop scene with a dragon generated through BlendRelay"><figcaption>BlendRelay city and dragon scene.</figcaption></figure>
+        <figure class="workflow-shot hero-shot"><img srcset="/blendrelay-mcp/assets/media/hero-dragon-city-640.webp 640w, /blendrelay-mcp/assets/media/hero-dragon-city-1024.webp 1024w, /blendrelay-mcp/assets/media/hero-dragon-city.webp 2048w" sizes="(max-width: 900px) 100vw, 560px" fetchpriority="high" decoding="async" src="/blendrelay-mcp/assets/media/hero-dragon-city.webp" width="2048" height="1190" alt="Cinematic Blender city rooftop scene with a dragon generated through BlendRelay"><figcaption>BlendRelay city and dragon scene.</figcaption></figure>
         <div class="hero-chip">Prompt in Blender. Inspect the scene. Continue editing with the objects, rig, camera, and timeline still under your control.</div>
       </div>
     </section>
@@ -41,6 +42,11 @@
       <div><strong>Artist-directed scope</strong>Use selections, Edit Mode geometry, references, sketches and target boxes to specify where work belongs.</div>
       <div><strong>Editable Blender output</strong>Keep named objects, collections, armatures, keyframes and scene data available for normal refinement.</div>
     </section>
+
+    <section class="section"><div class="shell video-section">
+      <div class="section-head"><div><p class="eyebrow">Watch the demo</p><h2>See a full scene built, rigged and animated.</h2></div><p>One Blender project from a city prompt to a dragon in flight: scene generation, a selected-dragon rig, a target-box prop, a sketch-guided camera fix and flight animation.</p></div>
+      <div class="video" data-video="AaTDT457A3U"><button type="button" class="video-play" aria-label="Play the video: Blender AI Demo: Build, Rig &amp; Animate a Dragon"><img src="/blendrelay-mcp/assets/media/dragon-flight-animation-1024.webp" srcset="/blendrelay-mcp/assets/media/dragon-flight-animation-640.webp 640w, /blendrelay-mcp/assets/media/dragon-flight-animation-1024.webp 1024w, /blendrelay-mcp/assets/media/dragon-flight-animation.webp 2048w" sizes="(max-width: 900px) calc(100vw - 2rem), 860px" width="2048" height="1188" loading="lazy" decoding="async" alt=""><span class="play-icon" aria-hidden="true"></span><span class="video-label">Play video</span></button></div><p class="video-note">The player loads from YouTube (privacy-enhanced mode) when you press play. <a href="https://www.youtube.com/watch?v=AaTDT457A3U">Watch on YouTube</a>.</p>
+    </div></section>
 
     <section class="section"><div class="shell">
       <div class="section-head"><div><p class="eyebrow">Designed for real Blender work</p><h2>Move from idea to a controllable scene.</h2></div><p>BlendRelay is built for artists who need visual direction and repeatable iteration, not a one-click black box.</p></div>
@@ -54,7 +60,7 @@
     </div></section>
 
     <section class="section"><div class="shell case-study">
-      <div class="case-image"><figure class="workflow-shot hero-shot"><img src="/blendrelay-mcp/assets/media/blendrelay-ui.webp" width="2048" height="1224" alt="BlendRelay interface in the Blender viewport showing prompt, agent, generation profile and target controls"><figcaption>BlendRelay interface in Blender.</figcaption></figure></div>
+      <div class="case-image"><figure class="workflow-shot hero-shot"><img srcset="/blendrelay-mcp/assets/media/blendrelay-ui-640.webp 640w, /blendrelay-mcp/assets/media/blendrelay-ui-1024.webp 1024w, /blendrelay-mcp/assets/media/blendrelay-ui.webp 2048w" sizes="(max-width: 900px) 100vw, 460px" loading="lazy" decoding="async" src="/blendrelay-mcp/assets/media/blendrelay-ui.webp" width="2048" height="1224" alt="BlendRelay interface in the Blender viewport showing prompt, agent, generation profile and target controls"><figcaption>BlendRelay interface in Blender.</figcaption></figure></div>
       <div class="case-copy"><p class="eyebrow">Demonstrated workflow</p><h2>From a city prompt to an animated dragon flight.</h2><p class="lede">The dragon-city demonstration follows one connected Blender project: a cinematic scene, a selected-dragon armature, a target-box prop, a sketch-guided camera correction, and selected-armature flight animation.</p>
         <div class="steps">
           <div class="step"><b>1</b><span>Generate a New York-inspired rooftop city and perched dragon.</span></div>
