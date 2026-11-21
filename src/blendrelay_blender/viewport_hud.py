@@ -488,6 +488,38 @@ def _submit_agent_prompt(context):
     return True
 
 
+def has_console_toggle():
+    """True only where Blender registers the system-console operator (Windows builds).
+
+    hasattr(bpy.ops.wm, ...) is always True because bpy.ops returns a proxy for any
+    name, and built-in operators are not listed in bpy.types. get_rna_type() raises
+    KeyError when the operator is not registered, so it is reliable on every platform.
+    """
+    try:
+        bpy.ops.wm.console_toggle.get_rna_type()
+        return True
+    except (AttributeError, KeyError, RuntimeError):
+        return False
+
+
+def _toggle_system_console():
+    """Toggle Blender's system console where supported, or show a safe fallback message."""
+    if has_console_toggle():
+        try:
+            bpy.ops.wm.console_toggle()
+            return True
+        except (AttributeError, RuntimeError):
+            pass
+    HUD_STATE['flash_msg'] = 'Console logs: check launch terminal'
+    HUD_STATE['flash_time'] = time.monotonic()
+    print(
+        '[BlendRelay] System console toggle is unavailable on this platform; '
+        'view Blender logs in the launch terminal.',
+        flush=True,
+    )
+    return False
+
+
 # ── Main 2D Drawing Callback ────────────────────────────────────────────────
 
 def draw_viewport_hud():
@@ -744,7 +776,7 @@ def draw_viewport_hud():
     now = time.monotonic()
     if HUD_STATE['flash_msg'] and (now - HUD_STATE['flash_time'] < 2.5):
         msg = HUD_STATE['flash_msg']
-        fw = 180.0 * scale
+        fw = max(180.0 * scale, _prompt_measure(msg, 11 * scale) + 28.0 * scale)
         fx = hud_x + (hud_w - fw) / 2.0
         fy = hud_y + hud_h + 8.0 * scale
         _draw_rounded_box(
@@ -1003,8 +1035,7 @@ class AF_OT_ViewportHUDModal(bpy.types.Operator):
 
                 # 6. Console Toggle Button
                 if is_inside(bounds.get('btn_console')):
-                    if hasattr(bpy.ops.wm, 'console_toggle'):
-                        bpy.ops.wm.console_toggle()
+                    _toggle_system_console()
                     target_area.tag_redraw()
                     return {'RUNNING_MODAL'}
 

@@ -92,26 +92,40 @@ def refresh_versions():
 
 
 def default_antigravity_path():
-    p_agy = Path(os.environ.get('LOCALAPPDATA', '')) / 'agy' / 'bin' / 'agy.exe'
-    if p_agy.is_file():
-        return str(p_agy)
+    if sys.platform == 'win32':
+        p_agy = Path(os.environ.get('LOCALAPPDATA', '')) / 'agy' / 'bin' / 'agy.exe'
+        if p_agy.is_file():
+            return str(p_agy)
     which_agy = shutil.which('agy')
     if which_agy:
         return which_agy
-    p_user = Path.home() / '.local' / 'bin' / 'agy.exe'
-    if p_user.is_file():
-        return str(p_user)
-    p_ide = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'Antigravity IDE' / 'bin' / 'antigravity-ide.cmd'
-    if p_ide.is_file():
-        return str(p_ide)
-    return str(p_agy)
+    if sys.platform == 'win32':
+        p_user = Path.home() / '.local' / 'bin' / 'agy.exe'
+        if p_user.is_file():
+            return str(p_user)
+        p_ide = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'Antigravity IDE' / 'bin' / 'antigravity-ide.cmd'
+        if p_ide.is_file():
+            return str(p_ide)
+        return str(Path(os.environ.get('LOCALAPPDATA', '')) / 'agy' / 'bin' / 'agy.exe')
+    p_linux = Path.home() / '.local' / 'bin' / 'agy'
+    if p_linux.is_file():
+        return str(p_linux)
+    return 'agy'
 
 
 def default_codex_path():
-    p = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'OpenAI' / 'Codex' / 'bin' / 'codex.exe'
-    if p.is_file():
-        return str(p)
-    return r'C:\Users\mshef\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe'
+    # On Windows prefer the Codex app's own CLI over any codex on PATH (e.g. an npm shim).
+    if sys.platform == 'win32':
+        app = Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'OpenAI' / 'Codex' / 'bin' / 'codex.exe'
+        if app.is_file():
+            return str(app)
+    which_codex = shutil.which('codex')
+    if which_codex:
+        return which_codex
+    for candidate in (Path.home() / '.local' / 'bin' / 'codex', Path('/usr/local/bin/codex')):
+        if candidate.is_file():
+            return str(candidate)
+    return 'codex'
 
 
 def default_claude_path():
@@ -657,18 +671,28 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
     if agent == 'ANTIGRAVITY':
         exe_str = getattr(context.scene, 'blendrelay_antigravity_path', '').strip() or default_antigravity_path()
         executable = Path(exe_str)
-        agy_bin = Path(os.environ.get('LOCALAPPDATA', '')) / 'agy' / 'bin' / 'agy.exe'
-        if (not executable.is_file() or 'antigravity-ide' in str(executable).lower()) and agy_bin.is_file():
-            executable = agy_bin
-            try:
-                context.scene.blendrelay_antigravity_path = str(agy_bin)
-            except Exception:
-                pass
-        if not executable.is_file() and not shutil.which(str(executable)):
-            raise RuntimeError(
-                f'Antigravity CLI (agy.exe) not found at: {executable}. '
-                'Please install it via: irm https://antigravity.google/cli/install.ps1 | iex'
-            )
+        if sys.platform == 'win32':
+            agy_bin = Path(os.environ.get('LOCALAPPDATA', '')) / 'agy' / 'bin' / 'agy.exe'
+            if (not executable.is_file() or 'antigravity-ide' in str(executable).lower()) and agy_bin.is_file():
+                executable = agy_bin
+                try:
+                    context.scene.blendrelay_antigravity_path = str(agy_bin)
+                except Exception:
+                    pass
+        resolved = shutil.which(str(executable))
+        if not executable.is_file():
+            if resolved:
+                executable = Path(resolved)
+            elif sys.platform == 'win32':
+                raise RuntimeError(
+                    f'Antigravity CLI (agy.exe) not found at: {executable}. '
+                    'Please install it via: irm https://antigravity.google/cli/install.ps1 | iex'
+                )
+            else:
+                raise RuntimeError(
+                    f'Antigravity CLI (agy) not found at: {executable}. '
+                    'Ensure "agy" is installed and on your PATH, or set its path in BlendRelay Settings.'
+                )
         broad_permission = autonomous or getattr(context.scene, 'blendrelay_unattended_agent_permissions', True)
         narrow_permission = autonomous or getattr(context.scene, 'blendrelay_allow_antigravity_mcp', True)
         if narrow_permission:
@@ -1663,7 +1687,7 @@ class BR_PT_Main(bpy.types.Panel):
             # the runtime starts with the next agent run or the Connect button.
             conn_row.label(text='Waiting for runtime…', icon='TIME')
             conn_row.operator('blendrelay.refresh', text='Connect', icon='PLAY')
-        if hasattr(bpy.ops.wm, 'console_toggle'):
+        if viewport_hud.has_console_toggle():
             conn_row.operator('wm.console_toggle', text='', icon='CONSOLE')
 
         # ── 2. Segmented Pill Navigation Bar ────────────────────────────────
