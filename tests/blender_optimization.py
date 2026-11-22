@@ -23,6 +23,16 @@ for prop in ('blendrelay_claude_model', 'blendrelay_claude_model_custom', 'blend
 bpy.context.scene.blendrelay_agent_backend = 'CLAUDE'
 assert bpy.context.scene.blendrelay_agent_backend == 'CLAUDE'
 bpy.context.scene.blendrelay_agent_backend = previous_backend
+for prop in ('blendrelay_opencode_model', 'blendrelay_opencode_model_custom', 'blendrelay_opencode_path'):
+    assert hasattr(bpy.context.scene, prop), prop
+bpy.context.scene.blendrelay_codex_prompt = '   '
+bpy.context.scene.blendrelay_agent_backend = 'OPENCODE'
+assert bpy.context.scene.blendrelay_agent_backend == 'OPENCODE'
+assert ui.viewport_hud._submit_agent_prompt(bpy.context) is False
+assert ui.viewport_hud.HUD_STATE['flash_msg'] == 'Enter a prompt for OpenCode'
+bpy.context.scene.blendrelay_codex_prompt = previous_prompt
+ui.viewport_hud.HUD_STATE['typing'] = False
+bpy.context.scene.blendrelay_agent_backend = previous_backend
 import io
 claude_text = []
 ui.log_agent_stream(
@@ -30,6 +40,14 @@ ui.log_agent_stream(
     'Claude', io.StringIO(), claude_text,
 )
 assert claude_text == ['ready']
+opencode_text = []
+ui.log_agent_stream(
+    '{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"built"}}\n',
+    'OpenCode', io.StringIO(), opencode_text,
+)
+assert opencode_text == ['built']
+from blendrelay_blender import conversation
+assert conversation.event_id('{"type":"step_start","sessionID":"ses_1"}') == 'ses_1'
 assert bpy.context.scene.blendrelay_task_mode == 'AUTO'
 assert bpy.context.scene.blendrelay_resource_mode == 'FULL_BUILD'
 assert bpy.context.scene.blendrelay_verification == 'AUTO'

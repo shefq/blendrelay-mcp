@@ -31,6 +31,7 @@ class OptimizationTests(unittest.TestCase):
             })
         self.assertEqual(conversation.event_id('{"type":"thread.started","thread_id":"abc"}'),'abc')
         self.assertEqual(conversation.event_id('{"type":"result","session_id":"claude-abc"}'),'claude-abc')
+        self.assertEqual(conversation.event_id('{"type":"step_start","sessionID":"ses_abc"}'),'ses_abc')
 
     def test_claude_mcp_config_and_narrow_permission(self):
         with tempfile.TemporaryDirectory() as directory:

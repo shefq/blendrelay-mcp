@@ -1,5 +1,6 @@
 """Narrow, reversible permissions needed by headless agent providers."""
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -60,6 +61,42 @@ def claude_command(executable, mcp_config, resume_id='', model='', add_dirs=()):
         *claude_mcp_permission_args(),
         *(part for directory in add_dirs for part in ('--add-dir', str(directory))),
         *(['--resume', resume_id] if resume_id else []),
+        *(['--model', model] if model else []),
+    ]
+
+
+OPENCODE_MCP_REGISTRATION = 'opencode mcp add blendrelay --global -- uvx blendrelay-mcp mcp'
+
+
+def opencode_config_path():
+    """The global OpenCode config file that documentation registers MCP servers in."""
+    base = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode'
+    return base / 'opencode.json'
+
+
+def opencode_mcp_is_registered(path=None):
+    """True when the global OpenCode config lists a BlendRelay MCP server."""
+    path = Path(path) if path else opencode_config_path()
+    try:
+        config = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    servers = config.get('mcp', {}).get('servers', {}) if isinstance(config, dict) else {}
+    return isinstance(servers, dict) and isinstance(servers.get('blendrelay'), dict)
+
+
+def opencode_command(executable, resume_id='', model='', auto=True):
+    """Build the documented non-interactive OpenCode invocation.
+
+    The prompt is piped through stdin: `opencode run` accepts the message as an
+    optional argument, and stdin avoids command-line length limits.
+    """
+    return [
+        str(executable),
+        'run',
+        '--format', 'json',
+        *(['--auto'] if auto else []),
+        *(['--session', resume_id] if resume_id else []),
         *(['--model', model] if model else []),
     ]
 
@@ -142,7 +179,29 @@ def ensure_antigravity_mcp_permission(path=None):
     return True, path
 
 
-def agent_failure(exit_code, message='', log_text='', blender_errors=(), expected_edit=False, successful_edits=0):
+def opencode_run_failed(log_text):
+    """True only for a top-level OpenCode error event.
+
+    A recovered ``retry`` event also carries ``error.type`` (rate limits, for
+    example) and must not fail a run that later finishes. OpenCode marks its
+    events with ``sessionID``; Codex and Claude do not, so their logs are not
+    matched here.
+    """
+    for line in str(log_text).splitlines():
+        line = line.strip()
+        if not line.startswith('{'):
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get('type') == 'error' and data.get('sessionID'):
+            return True
+    return False
+
+
+def agent_failure(exit_code, message='', log_text='', blender_errors=(), expected_edit=False,
+                  successful_edits=0, agent=''):
     """Return a failure reason when a CLI incorrectly exits zero."""
     if blender_errors:
         latest = blender_errors[-1]
@@ -161,6 +220,8 @@ def agent_failure(exit_code, message='', log_text='', blender_errors=(), expecte
         marker in combined for marker in ('"subtype":"error_', '"subtype": "error_')
     ):
         return 'Claude Code reported an unsuccessful result; see the run log for details.'
+    if agent.lower() == 'opencode' and opencode_run_failed(log_text):
+        return 'OpenCode reported an error; see the run log for details.'
     if exit_code:
         return f'Agent exited with code {exit_code}.'
     if expected_edit and not successful_edits:

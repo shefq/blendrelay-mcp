@@ -11,17 +11,18 @@ from pathlib import Path
 import bpy
 from bpy.app.handlers import persistent
 
-AGENTS = ('ANTIGRAVITY', 'CODEX', 'CLAUDE')
+AGENTS = ('ANTIGRAVITY', 'CODEX', 'CLAUDE', 'OPENCODE')
 DEFAULT_AGENT = 'CODEX'
 MODEL_DEFAULT = '__DEFAULT__'
-MODEL_FIELDS = {f'blendrelay_{name}_model': agent
-                for name, agent in (('antigravity', 'ANTIGRAVITY'), ('codex', 'CODEX'), ('claude', 'CLAUDE'))}
-TEXT_FIELDS = tuple(f'blendrelay_{name}_{suffix}' for name in ('antigravity', 'codex', 'claude')
+_AGENT_PREFIXES = (('antigravity', 'ANTIGRAVITY'), ('codex', 'CODEX'), ('claude', 'CLAUDE'),
+                   ('opencode', 'OPENCODE'))
+MODEL_FIELDS = {f'blendrelay_{name}_model': agent for name, agent in _AGENT_PREFIXES}
+TEXT_FIELDS = tuple(f'blendrelay_{name}_{suffix}' for name, _agent in _AGENT_PREFIXES
                     for suffix in ('model_custom', 'path'))
 FIELDS = ('blendrelay_agent_backend', *MODEL_FIELDS, *TEXT_FIELDS)
 # Applied when the user has not chosen yet, so an old file's saved agent is not used.
 DEFAULTS = {'blendrelay_agent_backend': DEFAULT_AGENT, **{name: MODEL_DEFAULT for name in MODEL_FIELDS},
-            **{f'blendrelay_{name}_model_custom': '' for name in ('antigravity', 'codex', 'claude')}}
+            **{f'blendrelay_{name}_model_custom': '' for name, _agent in _AGENT_PREFIXES}}
 MAX_TEXT = 4096
 _applying = False
 _pending = None

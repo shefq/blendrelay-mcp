@@ -1,5 +1,6 @@
 """Provider usage is reported as supplied; cache/thinking fields are not added twice."""
 import json
+import re
 
 TOOL_ACTIONS={'execute_blender_python':'execute','build_scene_batch':'build_batch','mesh_edit':'mesh_edit',
               'validate_mesh_selection':'validate_selection','capture_viewport':'screenshot',
@@ -46,6 +47,28 @@ class Metrics:
                     self.seen.add(key);self.record(block.get('name','tool'),block.get('input',{}))
         if step.get('usage'):
             self.stage_usage.setdefault(self.last_stage,[]).append(step['usage'])
+        # OpenCode: one tool_use event per completed tool call.
+        if data.get('type')=='tool_use':
+            part=data.get('part',{})
+            state=part.get('state',{})
+            if state.get('status') in (None,'completed'):
+                key=part.get('id') or part.get('partID')
+                if key not in self.seen:
+                    self.seen.add(key);self.record(part.get('tool','tool'),state.get('input',{}))
+        # OpenCode: step_finish reports the tokens and cost spent on that step.
+        if data.get('type')=='step_finish':
+            part=data.get('part',{})
+            tokens=part.get('tokens') if isinstance(part.get('tokens'),dict) else {}
+            cache=tokens.get('cache') if isinstance(tokens.get('cache'),dict) else {}
+            if not isinstance(self.usage,dict):self.usage={}
+            for key,value in (('input_tokens',tokens.get('input')),('output_tokens',tokens.get('output')),
+                              ('reasoning_tokens',tokens.get('reasoning')),('cache_read_tokens',cache.get('read')),
+                              ('cache_write_tokens',cache.get('write'))):
+                if isinstance(value,(int,float)):
+                    self.usage[key]=self.usage.get(key,0)+value
+            cost=part.get('cost')
+            if isinstance(cost,(int,float)):
+                self.usage['total_cost_usd']=self.usage.get('total_cost_usd',0)+cost
         if data.get('event')=='result':self.usage=data.get('result',{}).get('usage',{})
         if data.get('type')=='turn.completed':self.usage=data.get('usage',{})
         if data.get('type')=='result' and isinstance(data.get('usage'),dict):self.usage=data['usage']
@@ -59,8 +82,17 @@ class Metrics:
         act=action.get('action','') if isinstance(action,dict) else ''
         # Direct MCP tool calls (Codex, Claude) carry no action field; use the tool name.
         # Antigravity wraps every MCP call as call_mcp_tool with the real name in ToolName.
+        # OpenCode exposes MCP tools as `blendrelay_<tool>`, or through Code Mode's
+        # `execute` wrapper, where the real tool appears in the code string.
         tool=params.get('ToolName') if isinstance(params,dict) and params.get('ToolName') else name
-        act=act or TOOL_ACTIONS.get(str(tool).split('__')[-1],'')
+        bare_tool=str(tool)
+        if bare_tool.startswith('blendrelay_'):
+            bare_tool=bare_tool[len('blendrelay_'):]
+        elif bare_tool=='execute' and isinstance(params,dict):
+            match=re.search(r'tools\.blendrelay\.([A-Za-z_]+)',str(params.get('code','')))
+            if match:
+                bare_tool=match.group(1)
+        act=act or TOOL_ACTIONS.get(bare_tool.split('__')[-1],'')
         stage=('verification' if act in {'validate_selection','screenshot'} else
                'editing' if act in {'execute','execute_code','build_batch','mesh_edit'} else
                'waiting' if 'job' in str(name) or 'job' in str(params.get('ToolName','') if isinstance(params,dict) else '') else
