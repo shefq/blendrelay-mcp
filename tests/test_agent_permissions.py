@@ -47,6 +47,18 @@ class AgentPermissionTests(unittest.TestCase):
         log='{"type":"result","subtype":"error_during_execution","session_id":"x"}'
         self.assertIn('Claude Code', agent_failure(0, log_text=log))
 
+    def test_opencode_error_event_is_failure_even_with_zero_exit(self):
+        log='{"type":"error","sessionID":"ses_1","error":{"type":"provider.no-route","message":"Model unavailable"}}'
+        self.assertIn('OpenCode', agent_failure(0, log_text=log, agent='OpenCode'))
+
+    def test_opencode_retry_is_not_a_failure(self):
+        log='{"type":"retry","sessionID":"ses_1","error":{"type":"provider.rate-limit","message":"limit"}}\n{"type":"step_finish","part":{"reason":"stop"}}'
+        self.assertIsNone(agent_failure(0, log_text=log, agent='OpenCode'))
+
+    def test_codex_error_event_is_not_reported_as_opencode(self):
+        log='{"type":"error","message":"boom","thread_id":"thread-1"}'
+        self.assertNotIn('OpenCode', str(agent_failure(0, log_text=log, agent='Codex')))
+
     def test_blender_job_error_overrides_zero_exit(self):
         failure=agent_failure(0,blender_errors=[{'action':'execute','error':'Traceback\nTypeError: bad argument'}])
         self.assertIn('TypeError: bad argument',failure)

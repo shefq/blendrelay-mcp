@@ -143,7 +143,25 @@ def default_claude_path():
     return 'claude'
 
 
-AGENT_NAMES = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude'}
+def default_opencode_path():
+    for name in ('opencode.exe', 'opencode.cmd', 'opencode'):
+        found = shutil.which(name)
+        if found:
+            return found
+    candidates = [
+        Path.home() / '.opencode' / 'bin' / 'opencode.exe',
+        Path.home() / '.opencode' / 'bin' / 'opencode',
+        Path.home() / '.local' / 'bin' / 'opencode',
+        Path(os.environ.get('APPDATA', '')) / 'npm' / 'opencode.cmd',
+        Path(os.environ.get('LOCALAPPDATA', '')) / 'opencode' / 'bin' / 'opencode.exe',
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return 'opencode'
+
+
+AGENT_NAMES = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude', 'OPENCODE': 'OpenCode'}
 
 
 def agent_display_name(agent):
@@ -162,6 +180,8 @@ _MODEL_ITEMS = {
               (MODEL_CUSTOM, 'Custom…', 'Enter a model identifier', 'OPTIONS', 1)],
     'CLAUDE': [(MODEL_DEFAULT, 'CLI default', 'Use the model configured by Claude Code', 'AUTO', 0),
                (MODEL_CUSTOM, 'Custom…', 'Enter a Claude model alias or identifier', 'OPTIONS', 1)],
+    'OPENCODE': [(MODEL_DEFAULT, 'CLI default', 'Use the model configured by OpenCode', 'AUTO', 0),
+                 (MODEL_CUSTOM, 'Custom…', 'Enter a provider/model identifier', 'OPTIONS', 1)],
 }
 
 
@@ -295,6 +315,44 @@ def discover_claude_models(executable=None):
     return len(models)
 
 
+OPENCODE_MODELS_TIMEOUT = 20
+
+
+def query_opencode_models(executable):
+    """Ask this OpenCode binary for its signed-in provider/model identifiers."""
+    completed = subprocess.run(
+        [str(executable), 'models'], capture_output=True, text=True, encoding='utf-8',
+        errors='replace', timeout=OPENCODE_MODELS_TIMEOUT, stdin=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+    )
+    if completed.returncode:
+        raise RuntimeError(f'opencode models exited with code {completed.returncode}')
+    models = []
+    for line in completed.stdout.splitlines():
+        model_id = line.strip()
+        # Identifiers are provider/model (and may contain extra slashes or a #variant).
+        if model_id and ' ' not in model_id and '\t' not in model_id:
+            models.append((model_id, model_id, f'OpenCode model: {model_id}'))
+    if not models:
+        raise RuntimeError('opencode models returned no models')
+    return models
+
+
+def discover_opencode_models(executable=None):
+    executable = executable or default_opencode_path()
+    if not (executable and (Path(executable).is_file() or shutil.which(executable))):
+        # Not installed is not an error: the user may not use OpenCode at all.
+        return max(0, len(_MODEL_ITEMS['OPENCODE']) - 2)
+    try:
+        models = query_opencode_models(executable)
+    except Exception as error:
+        # A failed refresh must not erase a previously discovered selection.
+        STATE['opencode_model_status'] = f'OpenCode model discovery failed: {error}'
+        return max(0, len(_MODEL_ITEMS['OPENCODE']) - 2)
+    _MODEL_ITEMS['OPENCODE'] = _enum_items('OpenCode', models)
+    return len(models)
+
+
 def ensure_model_item(agent, model_id):
     """Make a model saved in Blender's settings selectable before its list is refreshed.
 
@@ -311,7 +369,7 @@ def ensure_model_item(agent, model_id):
     if model_id in (MODEL_DEFAULT, MODEL_CUSTOM) or any(item[0] == model_id for item in items):
         return True
     known = [(item[0], item[1], item[2]) for item in items if item[0] not in (MODEL_DEFAULT, MODEL_CUSTOM)]
-    label = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude'}[agent]
+    label = {'ANTIGRAVITY': 'Antigravity', 'CODEX': 'Codex', 'CLAUDE': 'Claude', 'OPENCODE': 'OpenCode'}[agent]
     _MODEL_ITEMS[agent] = _enum_items(label, known + [(model_id, model_id, f'Saved {label} model: {model_id}')])
     return True
 
@@ -328,8 +386,13 @@ def model_items_claude(self, context):
     return _MODEL_ITEMS['CLAUDE']
 
 
+def model_items_opencode(self, context):
+    return _MODEL_ITEMS['OPENCODE']
+
+
 def selected_model(scene, agent):
-    prefix = {'ANTIGRAVITY': 'antigravity', 'CODEX': 'codex', 'CLAUDE': 'claude'}.get(agent, 'codex')
+    prefix = {'ANTIGRAVITY': 'antigravity', 'CODEX': 'codex', 'CLAUDE': 'claude',
+              'OPENCODE': 'opencode'}.get(agent, 'codex')
     choice = getattr(scene, f'blendrelay_{prefix}_model', MODEL_DEFAULT)
     custom = getattr(scene, f'blendrelay_{prefix}_model_custom', '').strip()
     if choice == MODEL_DEFAULT:
@@ -349,6 +412,8 @@ def refresh_models_async():
                          or default_claude_path())
     codex_executable = (getattr(scene, 'blendrelay_codex_path', '').strip()
                         or default_codex_path())
+    opencode_executable = (getattr(scene, 'blendrelay_opencode_path', '').strip()
+                           or default_opencode_path())
     if not _MODEL_REFRESH_LOCK.acquire(blocking=False):
         return
 
@@ -356,13 +421,16 @@ def refresh_models_async():
         try:
             # Codex first: its real list decides whether the saved Codex model is usable.
             codex_count = discover_codex_models(codex_executable)
-            STATE['revalidate_models'] = True  # applied by timer() on Blender's main thread
             claude_count = discover_claude_models(claude_executable)
             antigravity_count = discover_antigravity_models()
-            status = (f'{codex_count} Codex, {antigravity_count} Antigravity and '
-                      f'{claude_count} Claude models found')
+            STATE['opencode_model_status'] = ''
+            opencode_count = discover_opencode_models(opencode_executable)
+            STATE['revalidate_models'] = True  # applied by timer() on Blender's main thread
+            status = (f'{codex_count} Codex, {antigravity_count} Antigravity, '
+                      f'{claude_count} Claude and {opencode_count} OpenCode models found')
             claude_error = STATE.get('claude_model_status')
-            STATE['model_status'] = claude_error or status
+            opencode_error = STATE.get('opencode_model_status')
+            STATE['model_status'] = claude_error or opencode_error or status
         finally:
             STATE['need_redraw'] = True
             _MODEL_REFRESH_LOCK.release()
@@ -579,6 +647,41 @@ def log_agent_stream(line, agent_name, log_file, collected_text):
                 print('[Codex] ' + str(event.get('message', event.get('error', event))), flush=True)
             return
         except ValueError:
+            pass
+
+    if agent_name == 'OpenCode' and line_clean.startswith('{'):
+        try:
+            data = json.loads(line_clean)
+            event_type = data.get('type')
+            part = data.get('part') if isinstance(data.get('part'), dict) else {}
+            if event_type == 'text':
+                text = part.get('text', '')
+                if text:
+                    print(text, flush=True)
+                    # The newest text part is the final assistant answer; earlier
+                    # text parts were progress notes from previous steps.
+                    collected_text[:] = [text]
+            elif event_type == 'tool_use':
+                tool = part.get('tool', 'tool')
+                state = part.get('state', {})
+                status = state.get('status', '')
+                if status == 'completed':
+                    print(f"\n[OpenCode] Tool: {tool}({format_tool_params(state.get('input', {}))})", flush=True)
+                elif status == 'error':
+                    print(f"\n[OpenCode] Tool failed: {tool}", flush=True)
+            elif event_type == 'step_finish':
+                if part.get('reason') == 'stop':
+                    tokens = part.get('tokens', {}) if isinstance(part.get('tokens'), dict) else {}
+                    total = (tokens.get('input', 0) or 0) + (tokens.get('output', 0) or 0)
+                    cost = part.get('cost')
+                    cost_text = f' · ${cost:.4f}' if isinstance(cost, (int, float)) else ''
+                    print(f"\n[OpenCode] Finished ({total:,} new tokens{cost_text})", flush=True)
+            elif event_type == 'error':
+                error = data.get('error', {})
+                message = error.get('message') if isinstance(error, dict) else error
+                print(f"\n[OpenCode] ❌ {message}", flush=True)
+            return
+        except (ValueError, TypeError):
             pass
 
     # Handle Antigravity stream-json events
@@ -804,6 +907,19 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
         model = selected_model(context.scene, agent)
         if codex_model_unavailable(model):
             model = ''
+    elif agent == 'OPENCODE':
+        exe_str = getattr(context.scene, 'blendrelay_opencode_path', '').strip() or default_opencode_path()
+        resolved = shutil.which(exe_str)
+        executable = Path(resolved or exe_str)
+        if not executable.is_file():
+            raise RuntimeError(
+                f'OpenCode CLI not found at: {exe_str}. Install OpenCode, sign in, '
+                'then set its executable path in BlendRelay Settings.'
+            )
+        model = selected_model(context.scene, agent)
+        if not agent_permissions.opencode_mcp_is_registered():
+            print('[BlendRelay] OpenCode cannot see the BlendRelay MCP server yet. Register it once with: '
+                  f'{agent_permissions.OPENCODE_MCP_REGISTRATION}', flush=True)
     else:
         exe_str = getattr(context.scene, 'blendrelay_claude_path', '').strip() or default_claude_path()
         resolved = shutil.which(exe_str)
@@ -1033,6 +1149,12 @@ def start_agent(context, prompt_override=None, use_region=False, verification_pa
             '--output-last-message', str(final_path),
             '-',  # Read prompt from stdin, including potentially large mesh selections.
         ]
+    elif agent == 'OPENCODE':
+        auto = autonomous or getattr(context.scene, 'blendrelay_unattended_agent_permissions', True)
+        args = agent_permissions.opencode_command(
+            executable, resume_id=resume_id or '', model=model, auto=auto,
+        )
+        use_stdin = True
     else:
         claude_mcp_config = agent_permissions.write_claude_mcp_config(
             scene_root / 'agent_runs' / f'{run_id}.claude-mcp.json'
@@ -1153,6 +1275,7 @@ def check_agent():
     failure = agent_permissions.agent_failure(
         code, message, log_text, STATE.get('agent_job_errors', ()),
         STATE.get('agent_expected_edit', False), STATE.get('agent_successful_edits', 0),
+        agent=agent_name,
     )
     verify_after=bool(failure is None and STATE.get('agent_verify_after') and STATE.get('agent_successful_edits',0))
     original_request=STATE.get('agent_original_request','')
@@ -1819,7 +1942,8 @@ class BR_PT_Main(bpy.types.Panel):
             e_row = engine_card.row(align=True)
             e_row.prop(scene, 'blendrelay_agent_backend', expand=True)
             e_row.operator('blendrelay.refresh_models', text='', icon='FILE_REFRESH')
-            model_prefix = {'ANTIGRAVITY': 'antigravity', 'CODEX': 'codex', 'CLAUDE': 'claude'}[agent]
+            model_prefix = {'ANTIGRAVITY': 'antigravity', 'CODEX': 'codex', 'CLAUDE': 'claude',
+                            'OPENCODE': 'opencode'}[agent]
             model_prop = f'blendrelay_{model_prefix}_model'
             custom_prop = f'blendrelay_{model_prefix}_model_custom'
             engine_card.prop(scene, model_prop, text='Model')
@@ -1971,6 +2095,11 @@ class BR_PT_Main(bpy.types.Panel):
                 if scene.blendrelay_codex_model == MODEL_CUSTOM:
                     col.prop(scene, 'blendrelay_codex_model_custom', text='Custom model')
                 col.prop(scene, 'blendrelay_codex_path', text='CLI Path')
+            elif agent == 'OPENCODE':
+                col.prop(scene, 'blendrelay_opencode_model', text='Model')
+                if scene.blendrelay_opencode_model == MODEL_CUSTOM:
+                    col.prop(scene, 'blendrelay_opencode_model_custom', text='Custom model')
+                col.prop(scene, 'blendrelay_opencode_path', text='CLI Path')
             else:
                 col.prop(scene, 'blendrelay_claude_model', text='Model')
                 if scene.blendrelay_claude_model == MODEL_CUSTOM:
@@ -2135,6 +2264,7 @@ def register():
             ('ANTIGRAVITY', 'Antigravity', 'Run Google Antigravity to edit the Blender scene'),
             ('CODEX', 'Codex', 'Run OpenAI Codex CLI to edit the Blender scene'),
             ('CLAUDE', 'Claude', 'Run Anthropic Claude Code to edit the Blender scene'),
+            ('OPENCODE', 'OpenCode', 'Run OpenCode to edit the Blender scene'),
         ],
         default=agent_preferences.DEFAULT_AGENT,
         update=agent_preferences.changed,
@@ -2194,6 +2324,24 @@ def register():
         name='Claude executable',
         subtype='FILE_PATH',
         default=default_claude_path(),
+    )
+    bpy.types.Scene.blendrelay_opencode_model = EnumProperty(
+        update=agent_preferences.changed,
+        name='OpenCode model',
+        description='Models reported by OpenCode; refresh after signing in',
+        items=model_items_opencode,
+    )
+    bpy.types.Scene.blendrelay_opencode_model_custom = StringProperty(
+        update=agent_preferences.changed,
+        name='Custom model',
+        default='',
+        description='OpenCode provider/model identifier passed with --model',
+    )
+    bpy.types.Scene.blendrelay_opencode_path = StringProperty(
+        update=agent_preferences.changed,
+        name='OpenCode executable',
+        subtype='FILE_PATH',
+        default=default_opencode_path(),
     )
     bpy.types.Scene.blendrelay_reference_image = StringProperty(
         name='Reference Image',
@@ -2310,6 +2458,9 @@ def unregister():
         'blendrelay_claude_model',
         'blendrelay_claude_model_custom',
         'blendrelay_claude_path',
+        'blendrelay_opencode_model',
+        'blendrelay_opencode_model_custom',
+        'blendrelay_opencode_path',
         'blendrelay_reference_image',
         'blendrelay_reference_images',
     ]

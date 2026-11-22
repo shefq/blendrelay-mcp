@@ -25,6 +25,7 @@ keywords = [
     "text-to-blender",
     "codex",
     "claude",
+    "opencode",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

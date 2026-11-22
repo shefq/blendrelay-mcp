@@ -2,7 +2,7 @@
 
 **An open-source Blender AI add-on and MCP server for prompt-based 3D modeling, scene generation, Edit Mode changes, reference images, and viewport sketches.**
 
-BlendRelay MCP brings AI 3D modeling and text-to-Blender workflows into Blender 4.5+. Connect Codex, Claude Code, Antigravity, or another MCP-compatible AI agent; describe what you want; attach design references; sketch over the viewport; or target selected objects and mesh elements. The agent can then inspect and update the open `.blend` scene through typed Blender tools.
+BlendRelay MCP brings AI 3D modeling and text-to-Blender workflows into Blender 4.5+. Connect Codex, Claude Code, Antigravity, OpenCode, or another MCP-compatible AI agent; describe what you want; attach design references; sketch over the viewport; or target selected objects and mesh elements. The agent can then inspect and update the open `.blend` scene through typed Blender tools.
 
 [Visit the BlendRelay website](https://shefq.github.io/blendrelay-mcp/) · [Watch Demo](https://www.youtube.com/watch?v=AaTDT457A3U) · [Install from PyPI](https://pypi.org/project/blendrelay-mcp/) · [⭐ Star on GitHub](https://github.com/shefq/blendrelay-mcp)
 
@@ -32,6 +32,7 @@ You need:
   - OpenAI Codex CLI
   - Google Antigravity CLI
   - Anthropic Claude Code
+  - OpenCode
 
 
 ## Install BlendRelay
@@ -93,6 +94,19 @@ Install and sign in to [Claude Code](https://code.claude.com/docs/en/setup), the
 
 Conversation continuation is supported: enable **Continue** to resume the Claude session associated with the current Blender workspace, or click **New** to start cleanly.
 
+### OpenCode
+
+Install and sign in to [OpenCode](https://opencode.ai), then register BlendRelay once:
+
+```sh
+opencode mcp add blendrelay --global -- uvx blendrelay-mcp mcp
+opencode mcp list
+```
+
+Confirm `blendrelay` is connected. In Blender, choose **OpenCode**, pick a `provider/model` from the list (or leave **CLI default**), and generate. BlendRelay launches `opencode run --format json` and sends the prompt on stdin. Enable **Continue** to resume the OpenCode session for this workspace, or click **New** to start cleanly.
+
+OpenCode does not receive a per-run MCP config. The global registration above is required. If the panel prints that the server is missing, run the command again and check `~/.config/opencode/opencode.json` for `mcp.servers.blendrelay`.
+
 ### Other MCP clients
 
 Claude Desktop, Claude Code, Cursor, and other MCP clients can connect to Blender through the published package:
@@ -108,7 +122,22 @@ Claude Desktop, Claude Code, Cursor, and other MCP clients can connect to Blende
 }
 ```
 
-This external-client connection does not require the Blender panel to launch Codex, Claude, or Antigravity. Blender and the BlendRelay add-on still need to be open and connected.
+This external-client connection does not require the Blender panel to launch Codex, Claude, Antigravity, or OpenCode. Blender and the BlendRelay add-on still need to be open and connected.
+
+OpenCode V2 stores MCP servers under `mcp.servers`, not `mcpServers`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "blendrelay": {
+        "type": "local",
+        "command": ["uvx", "blendrelay-mcp", "mcp"]
+      }
+    }
+  }
+}
+```
 
 ## Your first creation
 
@@ -211,6 +240,7 @@ If Blender shows **Disconnected**:
 - Confirm the selected AI CLI is installed and signed in.
 - For Codex, run `codex mcp list` and confirm the server is named `blendrelay`.
 - For Claude, run `claude doctor` and confirm the CLI is healthy. BlendRelay supplies the MCP configuration automatically when Claude is launched from the panel.
+- For OpenCode, run `opencode mcp list` and confirm `blendrelay` is connected. Register it with `opencode mcp add blendrelay --global -- uvx blendrelay-mcp mcp` if it is missing.
 - Rerun `uvx --refresh blendrelay-mcp setup` after installing a new Blender version.
 - Restart Blender after updating the add-on.
 

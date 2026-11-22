@@ -50,7 +50,8 @@ accepts names or defaults to selected mesh objects.
 
 Continue conversation is optional and defaults off. When enabled, IDs are saved
 per BlendRelay workspace ID and backend under the runtime conversations directory.
-Codex uses exec resume with the explicit ID; Antigravity uses --conversation.
+Codex uses exec resume with the explicit ID; Antigravity uses --conversation;
+OpenCode uses --session with its sessionID.
 New Conversation clears the ID for that backend without deleting the old history.
 Scene versions sharing the workspace ID share the conversation, with fresh scene
 context supplied on every prompt. Copies made with Save As may also share that ID;
